@@ -1,4 +1,5 @@
 import copy
+import json
 
 from deepspec.modeling.dspark.common import validate_target_layer_ids
 
@@ -47,6 +48,11 @@ def build_draft_config(
             "markov_head_type must be provided when markov_rank > 0."
         )
 
+    draft_checkpoint_config = None
+    draft_checkpoint = getattr(model_args, "draft_model_name_or_path", None)
+    if draft_checkpoint:
+        draft_checkpoint_config = get_pretrained_draft_attn_config(draft_checkpoint)
+
     draft_config = target_text_config
     draft_config.architectures = ["Qwen3DSparkModel"]
     draft_config.target_model_type = str(target_config.model_type)
@@ -67,9 +73,45 @@ def build_draft_config(
     draft_config.markov_rank = markov_rank
     if markov_rank > 0:
         draft_config.markov_head_type = str(model_args.markov_head_type)
+
+    # A pretrained draft checkpoint (e.g. a DFlash draft trained externally)
+    # may use an attention geometry that differs from the target model's own
+    # config, since the draft is a much smaller network. Override the
+    # target-derived attention fields with the checkpoint's own values so the
+    # freshly-constructed module's tensor shapes match the checkpoint's
+    # state_dict exactly.
+    if draft_checkpoint_config is not None:
+        for key, value in draft_checkpoint_config.items():
+            setattr(draft_config, key, value)
+
     return draft_config
+
+
+_DRAFT_ATTN_CONFIG_KEYS = (
+    "head_dim",
+    "num_attention_heads",
+    "num_key_value_heads",
+    "sliding_window",
+    "use_sliding_window",
+    "max_window_layers",
+    "rope_parameters",
+)
+
+
+def get_pretrained_draft_attn_config(draft_model_name_or_path):
+    from huggingface_hub import hf_hub_download
+
+    config_path = hf_hub_download(
+        repo_id=draft_model_name_or_path, filename="config.json"
+    )
+    with open(config_path) as f:
+        raw_config = json.load(f)
+    return {
+        key: raw_config[key] for key in _DRAFT_ATTN_CONFIG_KEYS if key in raw_config
+    }
 
 
 __all__ = [
     "build_draft_config",
+    "get_pretrained_draft_attn_config",
 ]

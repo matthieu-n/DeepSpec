@@ -260,6 +260,9 @@ class BaseTrainer:
             target_config=target_config,
             model_args=model_args,
         )
+        draft_checkpoint = getattr(model_args, "draft_model_name_or_path", None)
+        if draft_checkpoint:
+            self._load_pretrained_draft_weights(draft_model, draft_checkpoint)
         draft_model = draft_model.to(device=self.device, dtype=self.precision_dtype)
 
         # Training only uses the target checkpoint to initialize frozen draft
@@ -287,6 +290,29 @@ class BaseTrainer:
 
     def _build_draft_model(self, *, target_config, model_args):
         raise NotImplementedError
+
+    def _load_pretrained_draft_weights(self, draft_model, draft_model_name_or_path):
+        # embed_tokens/lm_head are intentionally absent from external DFlash
+        # draft checkpoints, since build_models() always overwrites them from
+        # the frozen target model right after this call.
+        from huggingface_hub import hf_hub_download
+        from safetensors.torch import load_file
+
+        ckpt_path = hf_hub_download(
+            repo_id=draft_model_name_or_path, filename="model.safetensors"
+        )
+        state_dict = load_file(ckpt_path)
+        missing, unexpected = draft_model.load_state_dict(state_dict, strict=False)
+        assert not unexpected, (
+            f"Unexpected keys loading {draft_model_name_or_path}: {unexpected}"
+        )
+        assert set(missing) <= {"embed_tokens.weight", "lm_head.weight"}, (
+            f"Unexpected missing keys loading {draft_model_name_or_path}: {missing}"
+        )
+        print_on_local_main(
+            f"Initialized draft model from pretrained checkpoint "
+            f"{draft_model_name_or_path} (missing={sorted(missing)})"
+        )
 
     def _wrap_with_fsdp(self, model):
         fsdp_kwargs = _build_fsdp_kwargs(
