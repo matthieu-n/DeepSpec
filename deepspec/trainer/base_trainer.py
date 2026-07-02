@@ -8,7 +8,12 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.utils.data import DataLoader
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+)
 
 from deepspec.data import CacheDataset, validate_train_cache
 from deepspec.data.cuda_prefetcher import CUDAPrefetcher
@@ -258,8 +263,14 @@ class BaseTrainer:
         draft_model = draft_model.to(device=self.device, dtype=self.precision_dtype)
 
         # Training only uses the target checkpoint to initialize frozen draft
-        # embeddings and lm_head weights.
-        target_model = AutoModelForCausalLM.from_pretrained(
+        # embeddings and lm_head weights. VLM-wrapped targets (e.g. Qwen3.5)
+        # register under AutoModelForImageTextToText, not AutoModelForCausalLM.
+        target_model_cls = (
+            AutoModelForImageTextToText
+            if str(target_config.model_type) in ("qwen3_5",)
+            else AutoModelForCausalLM
+        )
+        target_model = target_model_cls.from_pretrained(
             model_args.target_model_name_or_path,
             dtype=self.precision_dtype,
         ).to(device="cpu").eval()

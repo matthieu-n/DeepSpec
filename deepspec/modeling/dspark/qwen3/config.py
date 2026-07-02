@@ -6,11 +6,24 @@ from deepspec.modeling.dspark.common import validate_target_layer_ids
 TRAIN_ATTN_IMPLEMENTATION = "flex_attention"
 
 
+def get_qwen3_text_config(target_config):
+    model_type = str(target_config.model_type)
+    if model_type == "qwen3_5":
+        text_config = target_config.text_config
+        assert str(text_config.model_type) == "qwen3_5_text", (
+            "Qwen3.5 DSpark expects target_config.text_config.model_type to be "
+            f"'qwen3_5_text', got {text_config.model_type!r}."
+        )
+        return copy.deepcopy(text_config)
+    return copy.deepcopy(target_config)
+
+
 def build_draft_config(
     target_config,
     model_args,
 ):
-    num_target_layers = int(target_config.num_hidden_layers)
+    target_text_config = get_qwen3_text_config(target_config)
+    num_target_layers = int(target_text_config.num_hidden_layers)
     num_draft_layers = int(model_args.num_draft_layers)
     layer_types = ["full_attention"] * num_draft_layers
     assert "target_layer_ids" in model_args, "target_layer_ids must be provided."
@@ -34,8 +47,9 @@ def build_draft_config(
             "markov_head_type must be provided when markov_rank > 0."
         )
 
-    draft_config = copy.deepcopy(target_config)
+    draft_config = target_text_config
     draft_config.architectures = ["Qwen3DSparkModel"]
+    draft_config.target_model_type = str(target_config.model_type)
     draft_config.num_target_layers = num_target_layers
     draft_config.num_hidden_layers = num_draft_layers
     draft_config.block_size = int(model_args.block_size)
