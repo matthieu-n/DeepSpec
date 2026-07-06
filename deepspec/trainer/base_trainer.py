@@ -441,6 +441,13 @@ class BaseTrainer:
         if self.global_step >= self.max_train_steps:
             return
 
+        # Baseline eval before any optimizer step, logged at global_step=0,
+        # so val/accept_rate@pos in MLflow has a pre-finetuning reference
+        # point to diff future steps against. Skipped on resume (a mid-run
+        # restart is not "before training").
+        if self.next_micro_step == 0:
+            self.evaluate()
+
         local_batch_size = int(self.args.train.local_batch_size)
         total_micro_steps = self.max_train_steps * self.gradient_accumulation_steps
         remaining_micro_steps = total_micro_steps - self.next_micro_step
