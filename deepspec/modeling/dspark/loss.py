@@ -92,6 +92,7 @@ def _collect_local_terms(
     outputs: DSparkForwardOutput,
     loss_decay_gamma: Optional[float],
     l1_loss_alpha: float,
+    tag: str = "train",
 ) -> tuple[dict[str, torch.Tensor], bool]:
     draft_logits = outputs.draft_logits
     target_ids = outputs.target_ids
@@ -194,32 +195,32 @@ def _collect_local_terms(
             f"accept_rate@{pos_idx}",
             pos_accept_sums[pos_idx],
             den=pos_total_counts[pos_idx],
-            tag="train",
+            tag=tag,
         )
     add_metric(
         "tau_probabilistic",
         tau_prob_sum,
         den=accept_block_count,
-        tag="train",
+        tag=tag,
     )
     if has_confidence:
         add_metric(
             "confidence_abs_error",
             confidence_abs_error_num,
             den=confidence_loss_den,
-            tag="train",
+            tag=tag,
         )
         add_metric(
             "confidence_bias",
             confidence_bias_num,
             den=confidence_loss_den,
-            tag="train",
+            tag=tag,
         )
         add_metric(
             "confidence_cumprod_bias",
             confidence_cumprod_bias_num,
             den=confidence_loss_den,
-            tag="train",
+            tag=tag,
         )
     return loss_terms, has_confidence
 
@@ -259,11 +260,13 @@ def compute_dspark_loss(
     ce_loss_alpha: float,
     l1_loss_alpha: float,
     confidence_head_alpha: float,
+    tag: str = "train",
 ):
     loss_terms, has_confidence = _collect_local_terms(
         outputs=outputs,
         loss_decay_gamma=loss_decay_gamma,
         l1_loss_alpha=float(l1_loss_alpha),
+        tag=tag,
     )
     world_size = dist.get_world_size()
     global_denominators = _all_reduce_loss_denominators(
@@ -295,27 +298,27 @@ def compute_dspark_loss(
         "ce_loss",
         loss_terms["ce_loss_num"],
         den=loss_terms["ce_loss_den"],
-        tag="train",
+        tag=tag,
     )
     if global_denominators["l1_loss_den"].item() > 0:
         add_metric(
             "l1_loss",
             loss_terms["l1_loss_num"],
             den=loss_terms["l1_loss_den"],
-            tag="train",
+            tag=tag,
         )
     if has_confidence:
         add_metric(
             "confidence_loss",
             loss_terms["confidence_loss_num"],
             den=loss_terms["confidence_loss_den"],
-            tag="train",
+            tag=tag,
         )
     add_metric(
         "loss",
         local_loss,
         reduction="mean",
-        tag="train",
+        tag=tag,
     )
     backward_loss = _build_loss(
         loss_terms=loss_terms,

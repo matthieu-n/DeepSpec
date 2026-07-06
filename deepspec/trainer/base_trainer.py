@@ -26,6 +26,7 @@ from deepspec.utils import (
     print_on_global_main,
     print_on_local_main,
 )
+from deepspec.utils.metrics import flush as flush_metrics, reset as reset_metrics
 from deepspec.trainer.ckpt_manager import (
     discover_latest_checkpoint,
     load_resume_draft_model,
@@ -197,6 +198,16 @@ class BaseTrainer:
             target_model_name_or_path=self.args.model.target_model_name_or_path,
         )
 
+        val_target_cache_path = getattr(self.args.data, "val_target_cache_path", None)
+        self.val_dataset = None
+        if val_target_cache_path:
+            self.val_dataset = CacheDataset(cache_dir=val_target_cache_path)
+            validate_train_cache(
+                train_dataset=self.val_dataset,
+                draft_model=self.draft_model,
+                target_model_name_or_path=self.args.model.target_model_name_or_path,
+            )
+
         (
             self.gradient_accumulation_steps,
             self.samples_per_epoch,
@@ -348,8 +359,42 @@ class BaseTrainer:
             prefetch_factor=4,
         )
 
-    def run_batch(self, batch):
+    def run_batch(self, batch, tag: str = "train"):
         raise NotImplementedError
+
+    def _build_eval_dataloader(self):
+        sampler = torch.utils.data.DistributedSampler(
+            self.val_dataset,
+            num_replicas=self.world_size,
+            rank=self.global_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+        return DataLoader(
+            self.val_dataset,
+            batch_size=int(self.args.train.local_batch_size),
+            sampler=sampler,
+            collate_fn=self.data_collator_cls(),
+            num_workers=int(self.args.data.num_workers),
+            pin_memory=True,
+            drop_last=False,
+        )
+
+    @torch.no_grad()
+    def evaluate(self):
+        if self.val_dataset is None:
+            return
+        self.model.eval()
+        # Drop any train metrics accumulated since the last flush so they
+        # don't get mixed into this eval pass's summary.
+        reset_metrics()
+        dataloader = self._build_eval_dataloader()
+        prefetcher = CUDAPrefetcher(dataloader, self.device)
+        for batch in prefetcher:
+            self.run_batch(batch, tag="val")
+        summary = flush_metrics()
+        training_logger.log_eval_summary(summary, global_step=self.global_step)
+        self.model.train()
 
     def _checkpoint_kwargs(self):
         return dict(
@@ -367,6 +412,7 @@ class BaseTrainer:
 
     def save_and_eval_checkpoint(self):
         checkpoint_dir = save_checkpoint(**self._checkpoint_kwargs())
+        self.evaluate()
         if is_global_main_process():
             training_logger.log_artifacts(
                 checkpoint_dir, artifact_path=f"checkpoints/step_{self.global_step}"

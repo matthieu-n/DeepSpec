@@ -58,7 +58,10 @@ class Qwen3Eagle3Trainer(BaseTrainer):
         )
         return Qwen3Eagle3Model(draft_config)
 
-    def run_batch(self, batch):
+    def run_batch(self, batch, tag: str = "train"):
+        # compute_eagle3_loss does not yet support a tag override; validation
+        # is not wired up for Eagle3Trainer (val_target_cache_path is unset
+        # in existing eagle3 configs, so evaluate() never reaches this path).
         return compute_eagle3_loss(
             model=self.model,
             batch=batch,

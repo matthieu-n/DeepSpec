@@ -22,7 +22,7 @@ class Qwen3DSparkTrainer(BaseTrainer):
         return Qwen3DSparkModel(draft_config)
 
     # Training step.
-    def run_batch(self, batch):
+    def run_batch(self, batch, tag: str = "train"):
         outputs = self.model(
             input_ids=batch["input_ids"],
             target_hidden_states=batch["target_hidden_states"],
@@ -35,6 +35,7 @@ class Qwen3DSparkTrainer(BaseTrainer):
             ce_loss_alpha=float(self.args.model.ce_loss_alpha),
             l1_loss_alpha=float(self.args.model.l1_loss_alpha),
             confidence_head_alpha=float(self.args.model.confidence_head_alpha),
+            tag=tag,
         )
         return loss
 

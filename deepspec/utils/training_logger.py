@@ -70,6 +70,17 @@ def on_optimizer_step(
     return summary
 
 
+def log_eval_summary(summary: dict, *, global_step: int) -> None:
+    if not summary:
+        return
+    if is_global_main_process():
+        _write_scalars(summary, global_step=global_step)
+        loss_text = ""
+        if "val/loss" in summary:
+            loss_text = f" loss={summary['val/loss']:.4f}"
+        print_on_global_main(f"[eval] step={global_step}{loss_text}")
+
+
 def log_artifacts(local_dir: str, artifact_path: str) -> None:
     if _mlflow_run is None or not is_global_main_process():
         return
