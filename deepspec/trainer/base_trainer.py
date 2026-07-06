@@ -414,9 +414,12 @@ class BaseTrainer:
         checkpoint_dir = save_checkpoint(**self._checkpoint_kwargs())
         self.evaluate()
         if is_global_main_process():
-            training_logger.log_artifacts(
-                checkpoint_dir, artifact_path=f"checkpoints/step_{self.global_step}"
-            )
+            # Not uploading checkpoint_dir to mlflow: FSDP full-state-dict
+            # checkpoints run 33GB+ (25GB+ in training_state.rank0.pt alone)
+            # and the upload wedged training indefinitely at 0% GPU util,
+            # even with MLFLOW_HTTP_REQUEST_TIMEOUT set (see
+            # qwen-3-5-experiments.md). Checkpoints are already durable on
+            # the shared JuiceFS PVC; the mlflow copy was redundant.
             _launch_eval(
                 target_model_name_or_path=self.args.model.target_model_name_or_path,
                 checkpoint_dir=checkpoint_dir,
