@@ -108,7 +108,11 @@ def _write_scalars(summary, *, global_step: int) -> None:
     if _mlflow_run is not None:
         import mlflow
 
-        mlflow.log_metrics(summary, step=global_step)
+        # MLflow metric names allow only alphanumerics, '_-. :/' -- unlike
+        # TensorBoard, so per-position metrics like "accept_rate@3" need '@'
+        # replaced before logging here.
+        mlflow_summary = {key.replace("@", "_"): value for key, value in summary.items()}
+        mlflow.log_metrics(mlflow_summary, step=global_step)
 
 
 def _print_summary(
