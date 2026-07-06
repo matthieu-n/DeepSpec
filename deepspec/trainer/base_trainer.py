@@ -168,6 +168,11 @@ class BaseTrainer:
         training_logger.init(
             logging_steps=int(self.args.logging.logging_steps),
             tensorboard_dir=self.args.logging.tensorboard_dir,
+            mlflow_tracking_uri=getattr(self.args.logging, "mlflow_tracking_uri", None),
+            mlflow_experiment_name=getattr(
+                self.args.logging, "mlflow_experiment_name", None
+            ),
+            mlflow_run_name=self.args.exp_name,
         )
 
         self.draft_model, self.tokenizer = self.build_models()
@@ -363,6 +368,9 @@ class BaseTrainer:
     def save_and_eval_checkpoint(self):
         checkpoint_dir = save_checkpoint(**self._checkpoint_kwargs())
         if is_global_main_process():
+            training_logger.log_artifacts(
+                checkpoint_dir, artifact_path=f"checkpoints/step_{self.global_step}"
+            )
             _launch_eval(
                 target_model_name_or_path=self.args.model.target_model_name_or_path,
                 checkpoint_dir=checkpoint_dir,

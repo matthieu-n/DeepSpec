@@ -11,14 +11,28 @@ _writer: Optional[SummaryWriter] = None
 _logging_steps: int = 1
 _session_start_wall: Optional[float] = None
 _session_start_step: int = 0
+_mlflow_run = None
 
 
-def init(*, logging_steps: int, tensorboard_dir: Optional[str] = None) -> None:
-    global _writer, _logging_steps
+def init(
+    *,
+    logging_steps: int,
+    tensorboard_dir: Optional[str] = None,
+    mlflow_tracking_uri: Optional[str] = None,
+    mlflow_experiment_name: Optional[str] = None,
+    mlflow_run_name: Optional[str] = None,
+) -> None:
+    global _writer, _logging_steps, _mlflow_run
     _logging_steps = int(logging_steps)
     if tensorboard_dir is not None and is_global_main_process():
         ensure_dir(tensorboard_dir)
         _writer = SummaryWriter(tensorboard_dir)
+    if mlflow_tracking_uri is not None and is_global_main_process():
+        import mlflow
+
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+        mlflow.set_experiment(mlflow_experiment_name)
+        _mlflow_run = mlflow.start_run(run_name=mlflow_run_name)
 
 
 def start_session(*, global_step: int) -> None:
@@ -56,18 +70,34 @@ def on_optimizer_step(
     return summary
 
 
+def log_artifacts(local_dir: str, artifact_path: str) -> None:
+    if _mlflow_run is None or not is_global_main_process():
+        return
+    import mlflow
+
+    mlflow.log_artifacts(local_dir, artifact_path=artifact_path)
+
+
 def close() -> None:
-    global _writer
+    global _writer, _mlflow_run
     if _writer is not None:
         _writer.close()
         _writer = None
+    if _mlflow_run is not None:
+        import mlflow
+
+        mlflow.end_run()
+        _mlflow_run = None
 
 
 def _write_scalars(summary, *, global_step: int) -> None:
-    if _writer is None:
-        return
-    for key, value in summary.items():
-        _writer.add_scalar(key, value, global_step)
+    if _writer is not None:
+        for key, value in summary.items():
+            _writer.add_scalar(key, value, global_step)
+    if _mlflow_run is not None:
+        import mlflow
+
+        mlflow.log_metrics(summary, step=global_step)
 
 
 def _print_summary(
