@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 
 @dataclass
@@ -60,8 +63,12 @@ class MTPDraftModel(nn.Module):
     draft models, so it plugs directly into BaseTrainer.build_models().
     """
 
+    _META_FILENAME = "mtp_meta.json"
+    _WEIGHTS_FILENAME = "pytorch_model.bin"
+
     def __init__(self, head_config, *, model_type: str, target_layer_ids):
         super().__init__()
+        self.model_type = model_type
         spec = get_mtp_model_spec(model_type)
         self.head = spec.build_head(head_config)
         self.embed_tokens = nn.Embedding(head_config.vocab_size, head_config.hidden_size)
@@ -78,6 +85,46 @@ class MTPDraftModel(nn.Module):
         if freeze:
             self.embed_tokens.requires_grad_(False)
             self.lm_head.requires_grad_(False)
+
+    def set_embedding_head_trainable(self, trainable: bool):
+        self.embed_tokens.requires_grad_(trainable)
+        self.lm_head.requires_grad_(trainable)
+
+    def save_pretrained(self, save_directory, *, state_dict=None):
+        os.makedirs(save_directory, exist_ok=True)
+        if state_dict is None:
+            state_dict = self.state_dict()
+        torch.save(state_dict, os.path.join(save_directory, self._WEIGHTS_FILENAME))
+        self.config.to_json_file(os.path.join(save_directory, "config.json"))
+        with open(os.path.join(save_directory, self._META_FILENAME), "w") as f:
+            json.dump(
+                {"model_type": self.model_type, "target_layer_ids": self.target_layer_ids},
+                f,
+            )
+
+    @classmethod
+    def from_pretrained(cls, load_directory, *, dtype=None, attn_implementation=None):
+        with open(os.path.join(load_directory, cls._META_FILENAME)) as f:
+            meta = json.load(f)
+        head_config = PretrainedConfig.from_json_file(
+            os.path.join(load_directory, "config.json")
+        )
+        if attn_implementation is not None:
+            head_config._attn_implementation = attn_implementation
+        model = cls(
+            head_config,
+            model_type=meta["model_type"],
+            target_layer_ids=meta["target_layer_ids"],
+        )
+        state_dict = torch.load(
+            os.path.join(load_directory, cls._WEIGHTS_FILENAME),
+            map_location="cpu",
+            weights_only=True,
+        )
+        model.load_state_dict(state_dict)
+        if dtype is not None:
+            model = model.to(dtype=dtype)
+        return model
 
     def forward(self, *, target_last_hidden_states, input_ids, position_ids, attention_mask):
         next_token_embeds = self.embed_tokens(input_ids)
