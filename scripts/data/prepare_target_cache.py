@@ -296,10 +296,15 @@ def main(local_rank: int):
     tokenizer = AutoTokenizer.from_pretrained(
         config.model.target_model_name_or_path,
     )
+    # gemma4's sliding-window (window=1024) attention layers hit a known
+    # SDPA mask-generation issue that yields fully-masked rows near the
+    # window boundary -- softmax over an all -inf row is 0/0 = NaN, which
+    # then cascades through the residual stream. eager attention builds
+    # the mask correctly and avoids it.
     target_model = AutoModel.from_pretrained(
         config.model.target_model_name_or_path,
         dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation="eager",
     ).to(device=device).eval()
     target_hidden_size = _get_target_hidden_size(target_model)
     train_collator = ConversationCollator(
