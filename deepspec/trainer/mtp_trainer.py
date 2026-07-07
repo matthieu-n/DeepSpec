@@ -24,7 +24,11 @@ class MTPTrainer(BaseTrainer):
         spec = get_mtp_model_spec(model_type)
         text_config = target_config.get_text_config()
         head_config = spec.build_head_config(text_config)
-        draft_model = MTPDraftModel(head_config, model_type=model_type)
+        draft_model = MTPDraftModel(
+            head_config,
+            model_type=model_type,
+            target_layer_ids=model_args.target_layer_ids,
+        )
         spec.load_pretrained_weights(
             draft_model.head, str(model_args.target_model_name_or_path)
         )
