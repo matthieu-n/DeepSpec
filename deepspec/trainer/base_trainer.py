@@ -322,8 +322,18 @@ class BaseTrainer:
         assert not unexpected, (
             f"Unexpected keys loading {draft_model_name_or_path}: {unexpected}"
         )
-        assert set(missing) <= {"embed_tokens.weight", "lm_head.weight"}, (
-            f"Unexpected missing keys loading {draft_model_name_or_path}: {missing}"
+        # MoE submodules (Gemma4's router/experts + extra layernorms) are not
+        # part of the published DFlash draft checkpoint format and are
+        # expected to be freshly initialized, then learned during fine-tuning.
+        moe_missing_markers = (".router.", ".experts.", "post_feedforward_layernorm_1", "post_feedforward_layernorm_2", "pre_feedforward_layernorm_2")
+        allowed_missing = {"embed_tokens.weight", "lm_head.weight"}
+        unexpected_missing = [
+            key
+            for key in missing
+            if key not in allowed_missing and not any(marker in key for marker in moe_missing_markers)
+        ]
+        assert not unexpected_missing, (
+            f"Unexpected missing keys loading {draft_model_name_or_path}: {unexpected_missing}"
         )
         print_on_local_main(
             f"Initialized draft model from pretrained checkpoint "
