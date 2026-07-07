@@ -67,6 +67,7 @@ class MTPDraftModel(nn.Module):
         self.embed_tokens = nn.Embedding(head_config.vocab_size, head_config.hidden_size)
         self.lm_head = nn.Linear(head_config.hidden_size, head_config.vocab_size, bias=False)
         self.target_layer_ids = [int(layer_id) for layer_id in target_layer_ids]
+        self.config = head_config
 
     def initialize_embeddings_and_head(self, *, embed_tokens, lm_head, freeze: bool = True):
         assert self.embed_tokens.weight.shape == embed_tokens.weight.shape
