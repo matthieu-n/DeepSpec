@@ -45,6 +45,36 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # PyTorch 2.10 Inductor still reads the legacy allow_tf32 flag while compiling.
 torch.set_float32_matmul_precision("high")
 
+# TEMPORARY: see DSPARK_DEBUG_NAN in DeepSpec's deepspec/modeling/dspark/gemma4/modeling.py.
+# Traces which target-model layer first produces NaN/Inf, to root-cause NaN
+# loss on from-scratch training. Remove once the NaN root cause is fixed.
+_DEBUG_NAN = os.environ.get("DSPARK_DEBUG_NAN") == "1"
+
+
+def _debug_nan(tag: str, tensor: torch.Tensor) -> None:
+    if not _DEBUG_NAN:
+        return
+    t = tensor.detach().float()
+    has_nan = torch.isnan(t).any().item()
+    has_inf = torch.isinf(t).any().item()
+    flag = "BAD" if (has_nan or has_inf) else "ok"
+    finite = t[torch.isfinite(t)]
+    lo = finite.min().item() if finite.numel() else float("nan")
+    hi = finite.max().item() if finite.numel() else float("nan")
+    print(
+        f"[DSPARK_DEBUG_NAN] {flag} {tag}: nan={has_nan} inf={has_inf} "
+        f"finite_min={lo:.4g} finite_max={hi:.4g}",
+        flush=True,
+    )
+    if has_nan or has_inf:
+        per_sample_bad = (
+            (~torch.isfinite(t)).reshape(t.shape[0], -1).any(dim=-1).tolist()
+            if t.dim() >= 2
+            else None
+        )
+        if per_sample_bad is not None:
+            print(f"[DSPARK_DEBUG_NAN] {tag}: per_sample_bad={per_sample_bad}", flush=True)
+
 
 @dataclass(frozen=True)
 class TargetForwardResult:
@@ -112,13 +142,28 @@ def run_target_forward_with_hooks(
             )
 
         with torch.no_grad():
+            _debug_nan("target.input_ids", input_ids.float())
+            _debug_nan("target.attention_mask", attention_mask.float())
             target_output = target_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 output_hidden_states=False,
                 use_cache=False,
             )
+            for layer_id in target_layer_ids:
+                _debug_nan(f"target.layer{layer_id}", captured_hidden_states[layer_id])
             target_last_hidden_states = target_output.last_hidden_state.detach()
+            _debug_nan("target.last_hidden_state", target_last_hidden_states)
+            if _DEBUG_NAN:
+                bad_pos = ~torch.isfinite(target_last_hidden_states).all(dim=-1)
+                is_pad = attention_mask == 0
+                print(
+                    "[DSPARK_DEBUG_NAN] target.last_hidden_state bad_at_pad="
+                    f"{(bad_pos & is_pad).sum().item()} bad_at_real="
+                    f"{(bad_pos & ~is_pad).sum().item()} total_pad="
+                    f"{is_pad.sum().item()} total_real={(~is_pad).sum().item()}",
+                    flush=True,
+                )
             target_hidden_states = torch.cat(
                 [captured_hidden_states[layer_id] for layer_id in target_layer_ids],
                 dim=-1,
