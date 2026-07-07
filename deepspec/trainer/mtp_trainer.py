@@ -4,6 +4,7 @@ from deepspec.modeling.mtp.loss import compute_mtp_loss
 from deepspec.trainer.base_trainer import BaseTrainer
 
 # Importing registers each model_type's MTPModelSpec as a side effect.
+import deepspec.modeling.mtp.gemma4  # noqa: E402,F401
 import deepspec.modeling.mtp.qwen3_5  # noqa: E402,F401
 
 
