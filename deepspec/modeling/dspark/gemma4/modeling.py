@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import torch
@@ -31,6 +32,28 @@ from deepspec.modeling.dspark.common import (
 )
 from deepspec.modeling.dspark.markov_head import build_markov_head
 from deepspec.utils.sampling import sample_tokens
+
+# TEMPORARY: DSPARK_DEBUG_NAN=1 traces where NaN/Inf first appears in the
+# MoE decoder layer forward pass, to root-cause NaN loss on from-scratch
+# training. Remove once the NaN root cause is fixed.
+_DEBUG_NAN = os.environ.get("DSPARK_DEBUG_NAN") == "1"
+
+
+def _debug_nan(tag: str, tensor: torch.Tensor) -> None:
+    if not _DEBUG_NAN:
+        return
+    t = tensor.detach().float()
+    has_nan = torch.isnan(t).any().item()
+    has_inf = torch.isinf(t).any().item()
+    flag = "BAD" if (has_nan or has_inf) else "ok"
+    finite = t[torch.isfinite(t)]
+    lo = finite.min().item() if finite.numel() else float("nan")
+    hi = finite.max().item() if finite.numel() else float("nan")
+    print(
+        f"[DSPARK_DEBUG_NAN] {flag} {tag}: nan={has_nan} inf={has_inf} "
+        f"finite_min={lo:.4g} finite_max={hi:.4g}",
+        flush=True,
+    )
 
 
 class Gemma4DSparkAttention(nn.Module):
@@ -173,6 +196,7 @@ class Gemma4DSparkAttention(nn.Module):
 class Gemma4DSparkDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config, layer_idx: int):
         super().__init__()
+        self.layer_idx = int(layer_idx)
         self.hidden_size = config.hidden_size
         assert int(config.hidden_size_per_layer_input) == 0, (
             "Gemma4 DSpark prototype does not support per-layer input gates yet."
@@ -235,6 +259,7 @@ class Gemma4DSparkDecoderLayer(GradientCheckpointingLayer):
         assert position_embeddings is not None, "position_embeddings must be provided."
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
+        _debug_nan(f"layer{self.layer_idx}.input_layernorm", hidden_states)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             target_hidden_states=target_hidden_states,
@@ -244,24 +269,31 @@ class Gemma4DSparkDecoderLayer(GradientCheckpointingLayer):
             position_embeddings=position_embeddings,
             **kwargs,
         )[0]
+        _debug_nan(f"layer{self.layer_idx}.self_attn_out", hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
+        _debug_nan(f"layer{self.layer_idx}.post_attn_residual", hidden_states)
         residual = hidden_states
         hidden_states = self.pre_feedforward_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        _debug_nan(f"layer{self.layer_idx}.dense_mlp_out", hidden_states)
 
         if self.enable_moe_block:
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states)
 
             # Route on hidden states before the dense MLP, matching Gemma4TextDecoderLayer.
             hidden_states_flat = residual.reshape(-1, residual.shape[-1])
-            _, top_k_weights, top_k_index = self.router(hidden_states_flat)
+            router_logits, top_k_weights, top_k_index = self.router(hidden_states_flat)
+            _debug_nan(f"layer{self.layer_idx}.router_logits", router_logits)
+            _debug_nan(f"layer{self.layer_idx}.router_top_k_weights", top_k_weights)
             hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states_flat)
             hidden_states_2 = self.experts(hidden_states_2, top_k_index, top_k_weights)
+            _debug_nan(f"layer{self.layer_idx}.experts_out", hidden_states_2)
             hidden_states_2 = hidden_states_2.reshape(residual.shape)
             hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
 
             hidden_states = hidden_states_1 + hidden_states_2
+            _debug_nan(f"layer{self.layer_idx}.moe_combine", hidden_states)
 
         hidden_states = self.post_feedforward_layernorm(hidden_states)
         hidden_states = residual + hidden_states
@@ -458,7 +490,11 @@ class Gemma4DSparkModel(Gemma4PreTrainedModel):
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = noise_embedding
-        target_hidden_states = self.hidden_norm(self.fc(target_hidden_states))
+        _debug_nan("backbone.noise_embedding", noise_embedding)
+        _debug_nan("backbone.raw_target_hidden_states", target_hidden_states)
+        target_hidden_states = self.fc(target_hidden_states)
+        _debug_nan("backbone.fc_out", target_hidden_states)
+        target_hidden_states = self.hidden_norm(target_hidden_states)
         position_embeddings = self.rotary_emb(
             hidden_states,
             position_ids,
@@ -486,6 +522,9 @@ class Gemma4DSparkModel(Gemma4PreTrainedModel):
     ) -> DSparkForwardOutput:
         bsz, seq_len = input_ids.shape
         device = input_ids.device
+        _debug_nan("model.input_target_hidden_states", target_hidden_states)
+        if target_last_hidden_states is not None:
+            _debug_nan("model.input_target_last_hidden_states", target_last_hidden_states)
 
         anchor_positions, block_keep_mask = sample_anchor_positions(
             seq_len=seq_len,
@@ -520,6 +559,7 @@ class Gemma4DSparkModel(Gemma4PreTrainedModel):
             target_hidden_states=target_hidden_states,
             attention_mask=dspark_attn_mask,
         )
+        _debug_nan("model.output_hidden", output_hidden)
 
         num_blocks = anchor_positions.size(1)
         output_hidden_4d = output_hidden.reshape(
@@ -564,7 +604,9 @@ class Gemma4DSparkModel(Gemma4PreTrainedModel):
                     target_last_hidden_states.size(-1),
                 ),
             )
+            _debug_nan("model.aligned_target_hidden", aligned_target_hidden)
             aligned_target_logits = self.compute_logits(aligned_target_hidden)
+            _debug_nan("model.aligned_target_logits", aligned_target_logits)
         eval_mask = build_eval_mask(
             seq_len=seq_len,
             loss_mask=loss_mask,
@@ -587,6 +629,7 @@ class Gemma4DSparkModel(Gemma4PreTrainedModel):
             self.block_size,
             -1,
         )
+        _debug_nan("model.draft_logits_raw", draft_logits)
         if self.markov_head is not None:
             draft_logits = self.markov_head.apply_block_logits(
                 draft_logits,

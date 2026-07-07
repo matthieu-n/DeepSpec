@@ -1,3 +1,4 @@
+import os
 from typing import Optional
 
 import torch
@@ -6,6 +7,26 @@ import torch.nn.functional as F
 
 from deepspec.utils.metrics import add_metric
 from .common import DSparkForwardOutput
+
+# TEMPORARY: see DSPARK_DEBUG_NAN in deepspec/modeling/dspark/gemma4/modeling.py.
+_DEBUG_NAN = os.environ.get("DSPARK_DEBUG_NAN") == "1"
+
+
+def _debug_nan(tag: str, tensor: torch.Tensor) -> None:
+    if not _DEBUG_NAN:
+        return
+    t = tensor.detach().float()
+    has_nan = torch.isnan(t).any().item()
+    has_inf = torch.isinf(t).any().item()
+    flag = "BAD" if (has_nan or has_inf) else "ok"
+    finite = t[torch.isfinite(t)]
+    lo = finite.min().item() if finite.numel() else float("nan")
+    hi = finite.max().item() if finite.numel() else float("nan")
+    print(
+        f"[DSPARK_DEBUG_NAN] {flag} {tag}: nan={has_nan} inf={has_inf} "
+        f"finite_min={lo:.4g} finite_max={hi:.4g}",
+        flush=True,
+    )
 
 
 def _all_reduce_loss_denominators(
@@ -107,10 +128,12 @@ def _collect_local_terms(
         device=device,
         loss_decay_gamma=loss_decay_gamma,
     )
+    _debug_nan(f"{tag}.draft_logits", draft_logits)
     flat_logits = draft_logits.reshape(-1, vocab_size)
     flat_targets = target_ids.reshape(-1)
     flat_weights = loss_weight_mask.reshape(-1)
     loss_per_token = F.cross_entropy(flat_logits, flat_targets, reduction="none")
+    _debug_nan(f"{tag}.loss_per_token", loss_per_token)
     ce_loss_num = (loss_per_token * flat_weights).sum()
     ce_loss_den = flat_weights.sum()
     aligned_target_logits = outputs.aligned_target_logits
