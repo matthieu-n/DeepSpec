@@ -163,6 +163,20 @@ def run_target_forward_with_hooks(
 
         return hook
 
+    # TEMPORARY: router_probabilities (softmax output) is the very FIRST bad
+    # tensor observed (as early as layer0), even though the router's input
+    # (the same finite post-attention residual the clean mlp branch also
+    # reads) is finite. Hook router.proj directly to see whether the raw
+    # pre-softmax expert_scores logits are already NaN/Inf -- softmax itself
+    # is numerically stable (subtracts max internally) and shouldn't produce
+    # NaN from finite input, so if expert_scores is already bad, the bug is
+    # in router.proj's matmul (possibly its FP8 dequant/GEMM), not softmax.
+    def make_router_proj_hook(layer_id: int):
+        def hook(_module, _inputs, output):
+            _debug_nan(f"target.layer{layer_id}.router_proj_out", output)
+
+        return hook
+
     def make_realtime_pre_hook(layer_id: int):
         def hook(_module, inputs):
             _debug_nan(f"target.layer{layer_id}.realtime_raw_input", inputs[0])
@@ -236,6 +250,29 @@ def run_target_forward_with_hooks(
                     handles.append(
                         layer.router.register_forward_hook(make_router_hook(layer_id))
                     )
+                    handles.append(
+                        layer.router.proj.register_forward_hook(
+                            make_router_proj_hook(layer_id)
+                        )
+                    )
+                    if layer_id == 0:
+                        print(
+                            f"[DSPARK_DEBUG_NAN] target.layer0.router.proj type="
+                            f"{type(layer.router.proj)!r} weight_dtype="
+                            f"{layer.router.proj.weight.dtype}",
+                            flush=True,
+                        )
+                        _debug_nan(
+                            "target.layer0.router.proj.weight",
+                            layer.router.proj.weight.float(),
+                        )
+                        _debug_nan(
+                            "target.layer0.router.scale", layer.router.scale.float()
+                        )
+                        _debug_nan(
+                            "target.layer0.router.per_expert_scale",
+                            layer.router.per_expert_scale.float(),
+                        )
                     handles.append(
                         layer.pre_feedforward_layernorm_2.register_forward_hook(
                             make_submodule_hook(
