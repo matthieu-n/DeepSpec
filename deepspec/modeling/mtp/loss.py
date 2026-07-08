@@ -51,8 +51,27 @@ def compute_mtp_loss(*, model, batch):
     loss = (loss_per_token * mask).sum() / valid_tokens
 
     with torch.no_grad():
+        # Greedy speculative-decoding acceptance rate: a drafted token is
+        # accepted iff it exactly matches what the target model would have
+        # produced, i.e. this top-1 match rate.
         correct = (pred_logits.argmax(-1) == targets).to(torch.float32) * mask
-        add_metric("accuracy", correct.sum(), den=mask.sum(), tag="train")
+        add_metric("accept_rate_greedy", correct.sum(), den=mask.sum(), tag="train")
+
+        # Soft/probabilistic acceptance rate: 1 - 0.5*L1(draft_probs, target_probs),
+        # matching the eagle3 accept_rate@i convention. target_last_hidden_states is
+        # the target model's own final hidden state, and model.lm_head is a frozen
+        # copy of the target's lm_head, so applying it directly (bypassing the draft
+        # head) at position j+1 reconstructs the target's own next-token distribution
+        # for the same token pred_logits[:, j] is trying to predict.
+        # T=1 matches the untempered target distribution reconstructed above;
+        # only valid as a rejection-sampling proxy when target sampling is
+        # itself T=1 (rescale both logits by T before softmax otherwise).
+        temperature = 1.0
+        target_logits = model.lm_head(target_last_hidden_states[:, 1:-1, :])
+        draft_probs = torch.softmax(pred_logits.float() / temperature, dim=-1)
+        target_probs = torch.softmax(target_logits.float() / temperature, dim=-1)
+        accept_rate_soft = (1.0 - 0.5 * (draft_probs - target_probs).abs().sum(-1)) * mask
+        add_metric("accept_rate_soft", accept_rate_soft.sum(), den=mask.sum(), tag="train")
     add_metric("loss", loss.detach(), reduction="dp_mean", tag="train")
     return loss
 
