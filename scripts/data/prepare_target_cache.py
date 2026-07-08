@@ -333,10 +333,22 @@ def main(local_rank: int):
     # window boundary -- softmax over an all -inf row is 0/0 = NaN, which
     # then cascades through the residual stream. eager attention builds
     # the mask correctly and avoids it.
+    #
+    # The FP8-quantized MoE experts default to the "grouped_mm" dispatch
+    # (transformers.integrations.finegrained_fp8.fp8_grouped_mm_experts_forward),
+    # which sorts tokens by expert and relies on a post-hoc sentinel-row mask
+    # to zero out uninitialized rows from the grouped GEMM. On this checkpoint
+    # that NaN leaks past the mask: layer-by-layer tracing (DSPARK_DEBUG_NAN)
+    # shows every decoder layer's output is finite through layer 1, then 100%
+    # NaN starting at layer 2 and for every layer after, regardless of padding
+    # (confirmed even on batches with zero padding tokens). Forcing the eager
+    # per-expert loop (transformers.integrations.finegrained_fp8.FP8Experts.forward)
+    # avoids the grouped-mm sentinel-masking path entirely.
     target_model = AutoModel.from_pretrained(
         config.model.target_model_name_or_path,
         dtype=torch.bfloat16,
         attn_implementation="eager",
+        experts_implementation="eager",
     ).to(device=device).eval()
     target_hidden_size = _get_target_hidden_size(target_model)
     train_collator = ConversationCollator(
