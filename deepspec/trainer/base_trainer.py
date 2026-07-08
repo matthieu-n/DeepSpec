@@ -424,6 +424,12 @@ class BaseTrainer:
         checkpoint_dir = save_checkpoint(**self._checkpoint_kwargs())
         self.evaluate()
         if is_global_main_process():
+            # log_artifacts/log_final_checkpoint are best-effort (see
+            # training_logger.log_artifacts): FSDP full-state-dict checkpoints
+            # run 33GB+ and a stalled upload previously wedged training
+            # indefinitely at 0% GPU util (see qwen-3-5-experiments.md).
+            # Checkpoints are already durable on the shared JuiceFS PVC, so a
+            # failed/timed-out mlflow upload here is not fatal.
             artifact_path = f"checkpoints/step_{self.global_step}"
             training_logger.log_artifacts(checkpoint_dir, artifact_path=artifact_path)
             if is_final:
@@ -455,6 +461,13 @@ class BaseTrainer:
             self.evaluate()
         if self.global_step >= self.max_train_steps:
             return
+
+        # Baseline eval before any optimizer step, logged at global_step=0,
+        # so val/accept_rate@pos in MLflow has a pre-finetuning reference
+        # point to diff future steps against. Skipped on resume (a mid-run
+        # restart is not "before training").
+        if self.next_micro_step == 0:
+            self.evaluate()
 
         local_batch_size = int(self.args.train.local_batch_size)
         total_micro_steps = self.max_train_steps * self.gradient_accumulation_steps

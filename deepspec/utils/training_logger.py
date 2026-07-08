@@ -86,7 +86,20 @@ def log_artifacts(local_dir: str, artifact_path: str) -> None:
         return
     import mlflow
 
-    mlflow.log_artifacts(local_dir, artifact_path=artifact_path)
+    # Checkpoints are already durable on the shared PVC (BASE_CKPT_DIR) --
+    # this upload is best-effort convenience only. It has no timeout in
+    # mlflow's HTTP client and previously wedged training indefinitely at
+    # 0% GPU util after a multi-GB checkpoint dir stalled mid-upload (see
+    # qwen-3-5-experiments.md, code-intelligence run stuck at step 20).
+    # MLFLOW_HTTP_REQUEST_TIMEOUT (set in the job env) bounds each HTTP
+    # call so a stalled connection raises instead of hanging forever.
+    try:
+        mlflow.log_artifacts(local_dir, artifact_path=artifact_path)
+    except Exception as exc:
+        print_on_global_main(
+            f"[training_logger] log_artifacts failed, continuing without "
+            f"mlflow checkpoint upload: {exc!r}"
+        )
 
 
 def log_final_checkpoint(local_dir: str, artifact_path: str, *, step: int) -> None:
@@ -99,7 +112,7 @@ def log_final_checkpoint(local_dir: str, artifact_path: str, *, step: int) -> No
         return
     import mlflow
 
-    mlflow.log_artifacts(local_dir, artifact_path="final_checkpoint")
+    log_artifacts(local_dir, artifact_path="final_checkpoint")
     mlflow.set_tag("final_checkpoint_step", str(step))
     mlflow.set_tag("final_checkpoint_path", artifact_path)
 
@@ -123,7 +136,11 @@ def _write_scalars(summary, *, global_step: int) -> None:
     if _mlflow_run is not None:
         import mlflow
 
-        mlflow.log_metrics(summary, step=global_step)
+        # MLflow metric names allow only alphanumerics, '_-. :/' -- unlike
+        # TensorBoard, so per-position metrics like "accept_rate@3" need '@'
+        # replaced before logging here.
+        mlflow_summary = {key.replace("@", "_"): value for key, value in summary.items()}
+        mlflow.log_metrics(mlflow_summary, step=global_step)
 
 
 def _print_summary(
