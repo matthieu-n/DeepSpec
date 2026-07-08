@@ -420,13 +420,16 @@ class BaseTrainer:
             local_batch_size=int(self.args.train.local_batch_size),
         )
 
-    def save_and_eval_checkpoint(self):
+    def save_and_eval_checkpoint(self, *, is_final: bool = False):
         checkpoint_dir = save_checkpoint(**self._checkpoint_kwargs())
         self.evaluate()
         if is_global_main_process():
-            training_logger.log_artifacts(
-                checkpoint_dir, artifact_path=f"checkpoints/step_{self.global_step}"
-            )
+            artifact_path = f"checkpoints/step_{self.global_step}"
+            training_logger.log_artifacts(checkpoint_dir, artifact_path=artifact_path)
+            if is_final:
+                training_logger.log_final_checkpoint(
+                    checkpoint_dir, artifact_path, step=self.global_step
+                )
             _launch_eval(
                 target_model_name_or_path=self.args.model.target_model_name_or_path,
                 checkpoint_dir=checkpoint_dir,
@@ -503,7 +506,7 @@ class BaseTrainer:
                     self._save_and_suspend()
                     return
 
-        self.save_and_eval_checkpoint()
+        self.save_and_eval_checkpoint(is_final=True)
 
     def clean_up(self):
         training_logger.close()

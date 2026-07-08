@@ -89,6 +89,21 @@ def log_artifacts(local_dir: str, artifact_path: str) -> None:
     mlflow.log_artifacts(local_dir, artifact_path=artifact_path)
 
 
+def log_final_checkpoint(local_dir: str, artifact_path: str, *, step: int) -> None:
+    """Log the training-final checkpoint under a stable ``final_checkpoint``
+    artifact path (in addition to its per-step ``checkpoints/step_N`` copy)
+    and tag the run so the final checkpoint is discoverable without having to
+    know the last step number.
+    """
+    if _mlflow_run is None or not is_global_main_process():
+        return
+    import mlflow
+
+    mlflow.log_artifacts(local_dir, artifact_path="final_checkpoint")
+    mlflow.set_tag("final_checkpoint_step", str(step))
+    mlflow.set_tag("final_checkpoint_path", artifact_path)
+
+
 def close() -> None:
     global _writer, _mlflow_run
     if _writer is not None:

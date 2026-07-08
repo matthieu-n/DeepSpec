@@ -46,6 +46,8 @@ logging = dict(
     # cadence in addition to the checkpointing_steps-coupled eval, plus once
     # unconditionally before the first training step).
     eval_steps=2,
+    mlflow_tracking_uri="https://mlflow.us1.staging.dog/",
+    mlflow_experiment_name=project_name,
 )
 
 data = dict(
