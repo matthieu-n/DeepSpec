@@ -129,6 +129,18 @@ def run_target_forward_with_hooks(
 
         return hook
 
+    # TEMPORARY: trace every layer beyond the configured target_layer_ids, plus the
+    # final norm's input/output, to find where NaN/Inf appears between the last
+    # captured layer and target_output.last_hidden_state. See _DEBUG_NAN above.
+    extra_debug_layer_ids = []
+    norm_debug = {}
+
+    def norm_pre_hook(_module, inputs):
+        norm_debug["pre"] = inputs[0].detach()
+
+    def norm_hook(_module, _inputs, output):
+        norm_debug["post"] = output.detach()
+
     try:
         if -1 in target_layer_ids:
             handles.append(
@@ -140,6 +152,21 @@ def run_target_forward_with_hooks(
             handles.append(
                 layer_modules[layer_id].register_forward_hook(capture_layer(layer_id))
             )
+        if _DEBUG_NAN:
+            covered = set(target_layer_ids)
+            extra_debug_layer_ids = [
+                layer_id
+                for layer_id in range(len(layer_modules))
+                if layer_id not in covered
+            ]
+            for layer_id in extra_debug_layer_ids:
+                handles.append(
+                    layer_modules[layer_id].register_forward_hook(
+                        capture_layer(layer_id)
+                    )
+                )
+            handles.append(backbone.norm.register_forward_pre_hook(norm_pre_hook))
+            handles.append(backbone.norm.register_forward_hook(norm_hook))
 
         with torch.no_grad():
             _debug_nan("target.input_ids", input_ids.float())
@@ -152,6 +179,11 @@ def run_target_forward_with_hooks(
             )
             for layer_id in target_layer_ids:
                 _debug_nan(f"target.layer{layer_id}", captured_hidden_states[layer_id])
+            for layer_id in extra_debug_layer_ids:
+                _debug_nan(f"target.layer{layer_id}", captured_hidden_states[layer_id])
+            if _DEBUG_NAN:
+                _debug_nan("target.norm_input", norm_debug["pre"])
+                _debug_nan("target.norm_output", norm_debug["post"])
             target_last_hidden_states = target_output.last_hidden_state.detach()
             _debug_nan("target.last_hidden_state", target_last_hidden_states)
             if _DEBUG_NAN:
