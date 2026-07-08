@@ -177,6 +177,35 @@ def run_target_forward_with_hooks(
 
         return hook
 
+    # TEMPORARY: router_proj_out is already ~1e37-1e38 (near bf16 overflow)
+    # even in batches where router.proj.weight is confirmed small/normal
+    # (+-0.15) -- but Gemma4RMSNorm's _norm() is scale-invariant by
+    # construction (x * rsqrt(mean(x**2)+eps) always yields ~unit RMS per
+    # token, computed in fp32), and router.scale is a uniform ~30-34 gain
+    # times a fixed scalar_root_size (~0.019), so normed*scale*scalar_root
+    # should never exceed roughly hidden_dim**0.5 * 34 * 0.019 ~= 34 in the
+    # worst case. There is no legitimate path from that math to a 1e37
+    # matmul output. Hook router's raw input, router.norm's own output, and
+    # router.proj's actual input (post scale-multiply, pre-matmul) to find
+    # exactly which step introduces the explosion.
+    def make_router_pre_hook(layer_id: int):
+        def hook(_module, inputs):
+            _debug_nan(f"target.layer{layer_id}.router_raw_input", inputs[0])
+
+        return hook
+
+    def make_router_norm_hook(layer_id: int):
+        def hook(_module, _inputs, output):
+            _debug_nan(f"target.layer{layer_id}.router_norm_out", output)
+
+        return hook
+
+    def make_router_proj_pre_hook(layer_id: int):
+        def hook(_module, inputs):
+            _debug_nan(f"target.layer{layer_id}.router_proj_in", inputs[0])
+
+        return hook
+
     def make_realtime_pre_hook(layer_id: int):
         def hook(_module, inputs):
             _debug_nan(f"target.layer{layer_id}.realtime_raw_input", inputs[0])
@@ -249,6 +278,21 @@ def run_target_forward_with_hooks(
                     )
                     handles.append(
                         layer.router.register_forward_hook(make_router_hook(layer_id))
+                    )
+                    handles.append(
+                        layer.router.register_forward_pre_hook(
+                            make_router_pre_hook(layer_id)
+                        )
+                    )
+                    handles.append(
+                        layer.router.norm.register_forward_hook(
+                            make_router_norm_hook(layer_id)
+                        )
+                    )
+                    handles.append(
+                        layer.router.proj.register_forward_pre_hook(
+                            make_router_proj_pre_hook(layer_id)
+                        )
                     )
                     handles.append(
                         layer.router.proj.register_forward_hook(
