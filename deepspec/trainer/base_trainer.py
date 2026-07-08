@@ -448,6 +448,8 @@ class BaseTrainer:
 
     def train(self):
         self.model.train()
+        if self.global_step == 0:
+            self.evaluate()
         if self.global_step >= self.max_train_steps:
             return
 
@@ -491,8 +493,11 @@ class BaseTrainer:
                     grad_norm=grad_norm.item(),
                 )
 
+                eval_steps = getattr(self.args.logging, "eval_steps", None)
                 if self.global_step % int(self.args.logging.checkpointing_steps) == 0:
                     self.save_and_eval_checkpoint()
+                elif eval_steps and self.global_step % int(eval_steps) == 0:
+                    self.evaluate()
 
                 if self.suspend_controller.requested():
                     self._save_and_suspend()
