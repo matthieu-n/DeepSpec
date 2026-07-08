@@ -144,33 +144,30 @@ def run_target_forward_with_hooks(
     def norm_hook(_module, _inputs, output):
         norm_debug["post"] = output.detach()
 
-    # TEMPORARY: layer1 output is finite but layer2 output is 100% NaN even with
-    # attn_implementation="eager" and experts_implementation="eager" -- neither
-    # workaround fixed it, so the corruption isn't in the attention mask or the
-    # MoE grouped-mm dispatch. Trace every sub-module inside layer 2 to find the
-    # exact first op that produces NaN.
-    DEBUG_GRANULAR_LAYER_ID = 2
-
+    # TEMPORARY: the NaN onset layer moves between runs (layer2 in one run,
+    # layer4 in the next) depending on the freshly-regenerated training data,
+    # so hardcoding sub-module hooks on a single layer index misses it. Trace
+    # every decoder layer's sub-modules, in real time (not deferred), so
+    # whichever layer first produces NaN/Inf in a given run is caught.
     def make_submodule_hook(tag: str):
         def hook(_module, _inputs, output):
             _debug_nan(tag, _get_hook_tensor(output))
 
         return hook
 
-    def router_hook(_module, _inputs, output):
-        router_probabilities, top_k_weights, top_k_index = output
-        _debug_nan("target.layer2.router_probabilities", router_probabilities)
-        _debug_nan("target.layer2.router_top_k_weights", top_k_weights.float())
+    def make_router_hook(layer_id: int):
+        def hook(_module, _inputs, output):
+            router_probabilities, top_k_weights, top_k_index = output
+            _debug_nan(f"target.layer{layer_id}.router_probabilities", router_probabilities)
+            _debug_nan(f"target.layer{layer_id}.router_top_k_weights", top_k_weights.float())
 
-    # TEMPORARY: cross-check that layer1's captured output (printed post-hoc,
-    # after the whole forward pass finishes) matches what layer2 actually
-    # receives as input in real time, in case something mutates the tensor
-    # in-place between layer1 returning and layer2 running.
-    def layer1_realtime_hook(_module, _inputs, output):
-        _debug_nan("target.layer1.realtime_output", _get_hook_tensor(output))
+        return hook
 
-    def layer2_realtime_pre_hook(_module, inputs):
-        _debug_nan("target.layer2.realtime_raw_input", inputs[0])
+    def make_realtime_pre_hook(layer_id: int):
+        def hook(_module, inputs):
+            _debug_nan(f"target.layer{layer_id}.realtime_raw_input", inputs[0])
+
+        return hook
 
     try:
         if -1 in target_layer_ids:
@@ -199,71 +196,70 @@ def run_target_forward_with_hooks(
             handles.append(backbone.norm.register_forward_pre_hook(norm_pre_hook))
             handles.append(backbone.norm.register_forward_hook(norm_hook))
 
-            granular_layer = layer_modules[DEBUG_GRANULAR_LAYER_ID]
-            handles.append(
-                layer_modules[DEBUG_GRANULAR_LAYER_ID - 1].register_forward_hook(
-                    layer1_realtime_hook
-                )
-            )
-            handles.append(
-                granular_layer.register_forward_pre_hook(layer2_realtime_pre_hook)
-            )
-            _debug_nan(
-                "target.layer2.input_layernorm.weight",
-                granular_layer.input_layernorm.weight,
-            )
-            handles.append(
-                granular_layer.input_layernorm.register_forward_hook(
-                    make_submodule_hook("target.layer2.input_layernorm_out")
-                )
-            )
-            handles.append(
-                granular_layer.self_attn.register_forward_hook(
-                    make_submodule_hook("target.layer2.self_attn_out")
-                )
-            )
-            handles.append(
-                granular_layer.post_attention_layernorm.register_forward_hook(
-                    make_submodule_hook("target.layer2.post_attention_layernorm_out")
-                )
-            )
-            handles.append(
-                granular_layer.pre_feedforward_layernorm.register_forward_hook(
-                    make_submodule_hook("target.layer2.pre_feedforward_layernorm_out")
-                )
-            )
-            handles.append(
-                granular_layer.mlp.register_forward_hook(
-                    make_submodule_hook("target.layer2.mlp_out")
-                )
-            )
-            if granular_layer.enable_moe_block:
+            for layer_id, layer in enumerate(layer_modules):
                 handles.append(
-                    granular_layer.post_feedforward_layernorm_1.register_forward_hook(
-                        make_submodule_hook("target.layer2.post_feedforward_layernorm_1_out")
-                    )
+                    layer.register_forward_pre_hook(make_realtime_pre_hook(layer_id))
                 )
-                handles.append(granular_layer.router.register_forward_hook(router_hook))
                 handles.append(
-                    granular_layer.pre_feedforward_layernorm_2.register_forward_hook(
-                        make_submodule_hook("target.layer2.pre_feedforward_layernorm_2_out")
+                    layer.input_layernorm.register_forward_hook(
+                        make_submodule_hook(f"target.layer{layer_id}.input_layernorm_out")
                     )
                 )
                 handles.append(
-                    granular_layer.experts.register_forward_hook(
-                        make_submodule_hook("target.layer2.experts_out")
+                    layer.self_attn.register_forward_hook(
+                        make_submodule_hook(f"target.layer{layer_id}.self_attn_out")
                     )
                 )
                 handles.append(
-                    granular_layer.post_feedforward_layernorm_2.register_forward_hook(
-                        make_submodule_hook("target.layer2.post_feedforward_layernorm_2_out")
+                    layer.post_attention_layernorm.register_forward_hook(
+                        make_submodule_hook(f"target.layer{layer_id}.post_attention_layernorm_out")
                     )
                 )
-            handles.append(
-                granular_layer.post_feedforward_layernorm.register_forward_hook(
-                    make_submodule_hook("target.layer2.post_feedforward_layernorm_out")
+                handles.append(
+                    layer.pre_feedforward_layernorm.register_forward_hook(
+                        make_submodule_hook(f"target.layer{layer_id}.pre_feedforward_layernorm_out")
+                    )
                 )
-            )
+                handles.append(
+                    layer.mlp.register_forward_hook(
+                        make_submodule_hook(f"target.layer{layer_id}.mlp_out")
+                    )
+                )
+                if layer.enable_moe_block:
+                    handles.append(
+                        layer.post_feedforward_layernorm_1.register_forward_hook(
+                            make_submodule_hook(
+                                f"target.layer{layer_id}.post_feedforward_layernorm_1_out"
+                            )
+                        )
+                    )
+                    handles.append(
+                        layer.router.register_forward_hook(make_router_hook(layer_id))
+                    )
+                    handles.append(
+                        layer.pre_feedforward_layernorm_2.register_forward_hook(
+                            make_submodule_hook(
+                                f"target.layer{layer_id}.pre_feedforward_layernorm_2_out"
+                            )
+                        )
+                    )
+                    handles.append(
+                        layer.experts.register_forward_hook(
+                            make_submodule_hook(f"target.layer{layer_id}.experts_out")
+                        )
+                    )
+                    handles.append(
+                        layer.post_feedforward_layernorm_2.register_forward_hook(
+                            make_submodule_hook(
+                                f"target.layer{layer_id}.post_feedforward_layernorm_2_out"
+                            )
+                        )
+                    )
+                handles.append(
+                    layer.post_feedforward_layernorm.register_forward_hook(
+                        make_submodule_hook(f"target.layer{layer_id}.post_feedforward_layernorm_out")
+                    )
+                )
 
         with torch.no_grad():
             _debug_nan("target.input_ids", input_ids.float())
