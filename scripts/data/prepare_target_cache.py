@@ -125,7 +125,10 @@ def run_target_forward_with_hooks(
 
     def capture_layer(layer_id: int):
         def hook(_module, _inputs, output):
-            captured_hidden_states[layer_id] = _get_hook_tensor(output).detach()
+            # .clone() (not just .detach()) so a later in-place op elsewhere in the
+            # forward pass can't retroactively corrupt this snapshot before it's
+            # printed post-hoc by _debug_nan() below.
+            captured_hidden_states[layer_id] = _get_hook_tensor(output).detach().clone()
 
         return hook
 
@@ -159,6 +162,16 @@ def run_target_forward_with_hooks(
         _debug_nan("target.layer2.router_probabilities", router_probabilities)
         _debug_nan("target.layer2.router_top_k_weights", top_k_weights.float())
 
+    # TEMPORARY: cross-check that layer1's captured output (printed post-hoc,
+    # after the whole forward pass finishes) matches what layer2 actually
+    # receives as input in real time, in case something mutates the tensor
+    # in-place between layer1 returning and layer2 running.
+    def layer1_realtime_hook(_module, _inputs, output):
+        _debug_nan("target.layer1.realtime_output", _get_hook_tensor(output))
+
+    def layer2_realtime_pre_hook(_module, inputs):
+        _debug_nan("target.layer2.realtime_raw_input", inputs[0])
+
     try:
         if -1 in target_layer_ids:
             handles.append(
@@ -187,6 +200,18 @@ def run_target_forward_with_hooks(
             handles.append(backbone.norm.register_forward_hook(norm_hook))
 
             granular_layer = layer_modules[DEBUG_GRANULAR_LAYER_ID]
+            handles.append(
+                layer_modules[DEBUG_GRANULAR_LAYER_ID - 1].register_forward_hook(
+                    layer1_realtime_hook
+                )
+            )
+            handles.append(
+                granular_layer.register_forward_pre_hook(layer2_realtime_pre_hook)
+            )
+            _debug_nan(
+                "target.layer2.input_layernorm.weight",
+                granular_layer.input_layernorm.weight,
+            )
             handles.append(
                 granular_layer.input_layernorm.register_forward_hook(
                     make_submodule_hook("target.layer2.input_layernorm_out")
