@@ -322,8 +322,18 @@ class BaseTrainer:
         assert not unexpected, (
             f"Unexpected keys loading {draft_model_name_or_path}: {unexpected}"
         )
-        assert set(missing) <= {"embed_tokens.weight", "lm_head.weight"}, (
-            f"Unexpected missing keys loading {draft_model_name_or_path}: {missing}"
+        # MoE submodules (Gemma4's router/experts + extra layernorms) are not
+        # part of the published DFlash draft checkpoint format and are
+        # expected to be freshly initialized, then learned during fine-tuning.
+        moe_missing_markers = (".router.", ".experts.", "post_feedforward_layernorm_1", "post_feedforward_layernorm_2", "pre_feedforward_layernorm_2")
+        allowed_missing = {"embed_tokens.weight", "lm_head.weight"}
+        unexpected_missing = [
+            key
+            for key in missing
+            if key not in allowed_missing and not any(marker in key for marker in moe_missing_markers)
+        ]
+        assert not unexpected_missing, (
+            f"Unexpected missing keys loading {draft_model_name_or_path}: {unexpected_missing}"
         )
         print_on_local_main(
             f"Initialized draft model from pretrained checkpoint "
@@ -410,13 +420,16 @@ class BaseTrainer:
             local_batch_size=int(self.args.train.local_batch_size),
         )
 
-    def save_and_eval_checkpoint(self):
+    def save_and_eval_checkpoint(self, *, is_final: bool = False):
         checkpoint_dir = save_checkpoint(**self._checkpoint_kwargs())
         self.evaluate()
         if is_global_main_process():
-            training_logger.log_artifacts(
-                checkpoint_dir, artifact_path=f"checkpoints/step_{self.global_step}"
-            )
+            artifact_path = f"checkpoints/step_{self.global_step}"
+            training_logger.log_artifacts(checkpoint_dir, artifact_path=artifact_path)
+            if is_final:
+                training_logger.log_final_checkpoint(
+                    checkpoint_dir, artifact_path, step=self.global_step
+                )
             _launch_eval(
                 target_model_name_or_path=self.args.model.target_model_name_or_path,
                 checkpoint_dir=checkpoint_dir,
@@ -438,6 +451,8 @@ class BaseTrainer:
 
     def train(self):
         self.model.train()
+        if self.global_step == 0:
+            self.evaluate()
         if self.global_step >= self.max_train_steps:
             return
 
@@ -481,14 +496,17 @@ class BaseTrainer:
                     grad_norm=grad_norm.item(),
                 )
 
+                eval_steps = getattr(self.args.logging, "eval_steps", None)
                 if self.global_step % int(self.args.logging.checkpointing_steps) == 0:
                     self.save_and_eval_checkpoint()
+                elif eval_steps and self.global_step % int(eval_steps) == 0:
+                    self.evaluate()
 
                 if self.suspend_controller.requested():
                     self._save_and_suspend()
                     return
 
-        self.save_and_eval_checkpoint()
+        self.save_and_eval_checkpoint(is_final=True)
 
     def clean_up(self):
         training_logger.close()
