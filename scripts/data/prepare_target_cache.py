@@ -141,6 +141,24 @@ def run_target_forward_with_hooks(
     def norm_hook(_module, _inputs, output):
         norm_debug["post"] = output.detach()
 
+    # TEMPORARY: layer1 output is finite but layer2 output is 100% NaN even with
+    # attn_implementation="eager" and experts_implementation="eager" -- neither
+    # workaround fixed it, so the corruption isn't in the attention mask or the
+    # MoE grouped-mm dispatch. Trace every sub-module inside layer 2 to find the
+    # exact first op that produces NaN.
+    DEBUG_GRANULAR_LAYER_ID = 2
+
+    def make_submodule_hook(tag: str):
+        def hook(_module, _inputs, output):
+            _debug_nan(tag, _get_hook_tensor(output))
+
+        return hook
+
+    def router_hook(_module, _inputs, output):
+        router_probabilities, top_k_weights, top_k_index = output
+        _debug_nan("target.layer2.router_probabilities", router_probabilities)
+        _debug_nan("target.layer2.router_top_k_weights", top_k_weights.float())
+
     try:
         if -1 in target_layer_ids:
             handles.append(
@@ -167,6 +185,60 @@ def run_target_forward_with_hooks(
                 )
             handles.append(backbone.norm.register_forward_pre_hook(norm_pre_hook))
             handles.append(backbone.norm.register_forward_hook(norm_hook))
+
+            granular_layer = layer_modules[DEBUG_GRANULAR_LAYER_ID]
+            handles.append(
+                granular_layer.input_layernorm.register_forward_hook(
+                    make_submodule_hook("target.layer2.input_layernorm_out")
+                )
+            )
+            handles.append(
+                granular_layer.self_attn.register_forward_hook(
+                    make_submodule_hook("target.layer2.self_attn_out")
+                )
+            )
+            handles.append(
+                granular_layer.post_attention_layernorm.register_forward_hook(
+                    make_submodule_hook("target.layer2.post_attention_layernorm_out")
+                )
+            )
+            handles.append(
+                granular_layer.pre_feedforward_layernorm.register_forward_hook(
+                    make_submodule_hook("target.layer2.pre_feedforward_layernorm_out")
+                )
+            )
+            handles.append(
+                granular_layer.mlp.register_forward_hook(
+                    make_submodule_hook("target.layer2.mlp_out")
+                )
+            )
+            if granular_layer.enable_moe_block:
+                handles.append(
+                    granular_layer.post_feedforward_layernorm_1.register_forward_hook(
+                        make_submodule_hook("target.layer2.post_feedforward_layernorm_1_out")
+                    )
+                )
+                handles.append(granular_layer.router.register_forward_hook(router_hook))
+                handles.append(
+                    granular_layer.pre_feedforward_layernorm_2.register_forward_hook(
+                        make_submodule_hook("target.layer2.pre_feedforward_layernorm_2_out")
+                    )
+                )
+                handles.append(
+                    granular_layer.experts.register_forward_hook(
+                        make_submodule_hook("target.layer2.experts_out")
+                    )
+                )
+                handles.append(
+                    granular_layer.post_feedforward_layernorm_2.register_forward_hook(
+                        make_submodule_hook("target.layer2.post_feedforward_layernorm_2_out")
+                    )
+                )
+            handles.append(
+                granular_layer.post_feedforward_layernorm.register_forward_hook(
+                    make_submodule_hook("target.layer2.post_feedforward_layernorm_out")
+                )
+            )
 
         with torch.no_grad():
             _debug_nan("target.input_ids", input_ids.float())
