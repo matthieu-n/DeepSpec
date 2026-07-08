@@ -8,7 +8,7 @@ BASE_TB_DIR = os.path.expanduser("~/tensorboard")
 # Job after ttlSecondsAfterFinished) so checkpoints survive job cleanup.
 BASE_CKPT_DIR = "/share/dflash-logits-cache/checkpoints"
 project_name = "deepspec"
-exp_name = "mtp_gemma4_26b_a4b_code_workload_v2"
+exp_name = "mtp_gemma4_26b_a4b_code_workload_v3"
 seed = 42
 
 model = dict(
@@ -29,7 +29,7 @@ train = dict(
     precision="bf16",
     local_batch_size=1,
     global_batch_size=8,
-    num_train_epochs=3,
+    num_train_epochs=2,
     max_train_steps=None,
     max_grad_norm=1.0,
     # Training itself never re-runs the 26B backbone (target_last_hidden_states
