@@ -4,7 +4,9 @@ from deepspec.trainer import MTPTrainer
 
 
 BASE_TB_DIR = os.path.expanduser("~/tensorboard")
-BASE_CKPT_DIR = os.path.expanduser("~/checkpoints")
+# Persisted on the shared PVC (not /work, which is an emptyDir GC'd with the
+# Job after ttlSecondsAfterFinished) so checkpoints survive job cleanup.
+BASE_CKPT_DIR = "/share/dflash-logits-cache/checkpoints"
 project_name = "deepspec"
 exp_name = "mtp_qwen36_27b_code_intelligence"
 seed = 42
