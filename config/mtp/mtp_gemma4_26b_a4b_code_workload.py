@@ -8,7 +8,7 @@ BASE_TB_DIR = os.path.expanduser("~/tensorboard")
 # Job after ttlSecondsAfterFinished) so checkpoints survive job cleanup.
 BASE_CKPT_DIR = "/share/dflash-logits-cache/checkpoints"
 project_name = "deepspec"
-exp_name = "mtp_gemma4_26b_a4b_code_workload"
+exp_name = "mtp_gemma4_26b_a4b_code_workload_v2"
 seed = 42
 
 model = dict(
