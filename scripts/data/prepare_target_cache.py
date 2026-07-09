@@ -82,6 +82,42 @@ class TargetForwardResult:
     target_last_hidden_states: torch.Tensor
 
 
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
+
+def _dequantize_fp8_target_weights_(model: torch.nn.Module) -> int:
+    # TEMPORARY: RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic's quantization_config
+    # sets format="dense" (FP8 needs no bit-packing), so transformers'
+    # CompressedTensorsHfQuantizer._process_model_after_weight_loading skips
+    # ModelCompressor.decompress_model() entirely (it's gated on
+    # is_quantization_compressed, which is False for dense format). Quantized
+    # Linear weights are left as raw fp8 tensors with a `weight_scale` buffer
+    # and compressed_tensors' generic calibration forward hook still attached
+    # -- fine for a real fp8 GEMM kernel (vLLM/SGLang), but that hook's plain
+    # F.linear(bf16_input, fp8_weight) crashes with a dtype mismatch here.
+    # Dequantize every affected Linear's weight to bf16 in place and drop the
+    # hook (an instance-attribute override of `forward`) so it falls back to
+    # plain nn.Linear.forward on real bf16 x bf16 matmuls.
+    num_dequantized = 0
+    for module in model.modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        weight_scale = getattr(module, "weight_scale", None)
+        if weight_scale is None or module.weight.dtype not in _FP8_DTYPES:
+            continue
+        dequantized = module.weight.detach().to(torch.float32)
+        zero_point = getattr(module, "weight_zero_point", None)
+        if zero_point is not None:
+            dequantized = dequantized - zero_point.detach().to(torch.float32)
+        dequantized = dequantized * weight_scale.detach().to(torch.float32)
+        module.weight = torch.nn.Parameter(
+            dequantized.to(torch.bfloat16), requires_grad=False
+        )
+        module.__dict__.pop("forward", None)
+        num_dequantized += 1
+    return num_dequantized
+
+
 def _get_target_backbone(target_model):
     model_type = str(target_model.config.model_type)
     if model_type in ("gemma4", "gemma4_unified", "qwen3_5"):
@@ -597,6 +633,14 @@ def main(local_rank: int):
         attn_implementation="eager",
         experts_implementation="eager",
     ).model.to(device=device).eval()
+    num_fp8_dequantized = _dequantize_fp8_target_weights_(target_model)
+    if _DEBUG_NAN:
+        print(
+            f"[DSPARK_DEBUG_NAN] dequantized {num_fp8_dequantized} FP8 Linear "
+            "weights to bf16 (dense-format checkpoint, transformers skipped "
+            "decompress_model)",
+            flush=True,
+        )
     target_hidden_size = _get_target_hidden_size(target_model)
     train_collator = ConversationCollator(
         tokenizer=tokenizer,
