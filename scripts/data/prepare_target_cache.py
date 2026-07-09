@@ -6,7 +6,7 @@ import os
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Subset
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from deepspec.data import ConversationCollator
 from deepspec.data.target_cache_dataset import (
@@ -561,12 +561,42 @@ def main(local_rank: int):
     # (confirmed even on batches with zero padding tokens). Forcing the eager
     # per-expert loop (transformers.integrations.finegrained_fp8.FP8Experts.forward)
     # avoids the grouped-mm sentinel-masking path entirely.
-    target_model = AutoModel.from_pretrained(
+    #
+    # ROOT CAUSE of the actual NaN (forcing eager above did not fix it): this
+    # checkpoint's config.json quantization_config.ignore explicitly excludes
+    # every `model.language_model.layers.{i}.router.proj` from FP8
+    # quantization (confirmed both in the checkpoint's config.json and in its
+    # llm-compressor recipe.yaml: `ignore: [..., 're:.*router', ...]`) --
+    # router.proj is meant to stay a plain, unquantized bf16 nn.Linear.
+    # Loading with `AutoModel.from_pretrained` resolves to the bare `Gemma4Model`
+    # backbone, whose module tree is rooted one level shallower than the
+    # wrapper the ignore-list paths are written against (runtime path
+    # `language_model.layers.{i}.router.proj` vs. the checkpoint's
+    # `model.language_model.layers.{i}.router.proj`). compressed_tensors'
+    # `apply_quantization_config` ignore matching is a plain string/regex
+    # match against module names, so with `AutoModel` every single ignore
+    # entry silently fails to match, and router.proj gets treated as a
+    # generic quantization target: it's left with an uninitialized
+    # `weight_scale` buffer (no such tensor exists in the checkpoint for a
+    # module that was never meant to be quantized) that is garbage/NaN, and
+    # the compressed_tensors dequant hook then corrupts router.proj's real
+    # weight with that NaN scale on first use -- reproduced deterministically
+    # offline (CPU, meta device, no checkpoint download) by diffing
+    # `AutoModel.from_pretrained` against `AutoModelForCausalLM.from_pretrained`
+    # against this exact checkpoint's quantization_config.
+    # Loading via `AutoModelForCausalLM` resolves to the full
+    # `Gemma4ForConditionalGeneration` wrapper instead, whose module tree
+    # root matches the checkpoint's ignore-list paths exactly, so
+    # quantization is applied correctly and router.proj stays untouched.
+    # `.model` then extracts the same `Gemma4Model` backbone object that
+    # `AutoModel.from_pretrained` used to hand back directly, so nothing
+    # downstream (forward call, `_get_target_backbone`, etc.) needs to change.
+    target_model = AutoModelForCausalLM.from_pretrained(
         config.model.target_model_name_or_path,
         dtype=torch.bfloat16,
         attn_implementation="eager",
         experts_implementation="eager",
-    ).to(device=device).eval()
+    ).model.to(device=device).eval()
     target_hidden_size = _get_target_hidden_size(target_model)
     train_collator = ConversationCollator(
         tokenizer=tokenizer,
