@@ -172,8 +172,51 @@ def run_target_forward_with_hooks(
     # NaN from finite input, so if expert_scores is already bad, the bug is
     # in router.proj's matmul (possibly its FP8 dequant/GEMM), not softmax.
     def make_router_proj_hook(layer_id: int):
-        def hook(_module, _inputs, output):
+        def hook(module, inputs, output):
             _debug_nan(f"target.layer{layer_id}.router_proj_out", output)
+            # TEMPORARY: router_proj_in is confirmed small (+-30) and
+            # router.proj.weight was confirmed small (+-0.15) at setup time,
+            # yet router_proj_out is ~1e37/inf -- mathematically impossible
+            # for a plain matmul of those magnitudes (hidden_dim=2816 caps it
+            # around +-5000). Recompute the matmul manually in fp32 using the
+            # EXACT tensors captured at call time (not a separately-timed
+            # setup-time read) to tell whether (a) the weight is already
+            # huge at call time despite reading small at setup (would point
+            # at in-place corruption/aliasing between setup and forward), or
+            # (b) the manual recompute is clean (would prove self.proj's real
+            # forward isn't doing plain matmul at all -- e.g. a quantized
+            # GEMM kernel with a dequant-scale bug).
+            if layer_id == 0:
+                x = inputs[0].detach()
+                w = module.weight.detach()
+                print(
+                    f"[DSPARK_DEBUG_NAN] target.layer0.router.proj CALL-TIME "
+                    f"type={type(module)!r} mro={[c.__name__ for c in type(module).__mro__]} "
+                    f"weight_dtype={w.dtype} weight_shape={tuple(w.shape)} "
+                    f"input_dtype={x.dtype} input_shape={tuple(x.shape)}",
+                    flush=True,
+                )
+                quant_attrs = [
+                    a for a in dir(module) if "scale" in a.lower() or "zero_point" in a.lower()
+                ]
+                print(
+                    f"[DSPARK_DEBUG_NAN] target.layer0.router.proj quant_attrs={quant_attrs}",
+                    flush=True,
+                )
+                for attr in quant_attrs:
+                    val = getattr(module, attr)
+                    if isinstance(val, torch.Tensor):
+                        _debug_nan(f"target.layer0.router.proj.{attr}", val.float())
+                    else:
+                        print(
+                            f"[DSPARK_DEBUG_NAN] target.layer0.router.proj.{attr} = {val!r}",
+                            flush=True,
+                        )
+                _debug_nan("target.layer0.router.proj.weight_at_call", w.float())
+                manual = torch.matmul(x.float(), w.float().t())
+                _debug_nan(
+                    "target.layer0.router_proj_out_manual_recompute", manual
+                )
 
         return hook
 
