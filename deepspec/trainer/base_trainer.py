@@ -357,16 +357,27 @@ class BaseTrainer:
             start_global_offset_samples=start_offset_samples,
             num_samples=num_samples,
         )
+        num_workers = int(self.args.data.num_workers)
         return DataLoader(
             self.train_dataset,
             batch_size=int(self.args.train.local_batch_size),
             sampler=sampler,
             collate_fn=self.data_collator_cls(),
-            num_workers=int(self.args.data.num_workers),
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            # persistent_workers/prefetch_factor are only valid when
+            # num_workers > 0.
+            persistent_workers=num_workers > 0,
+            prefetch_factor=4 if num_workers > 0 else None,
+            # train.py launches the training process itself via
+            # torch.multiprocessing.spawn, so CUDA is already initialized in
+            # this process by the time the dataloader is built. The default
+            # "fork" start method for dataloader workers forks a process that
+            # already holds a CUDA context, which deadlocks (observed: main
+            # process parked in do_poll waiting on a worker pipe forever,
+            # right after the first checkpoint save). "spawn" avoids this.
+            multiprocessing_context="spawn" if num_workers > 0 else None,
         )
 
     def run_batch(self, batch, tag: str = "train"):
