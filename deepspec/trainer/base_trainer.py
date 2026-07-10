@@ -441,8 +441,13 @@ class BaseTrainer:
             # indefinitely at 0% GPU util (see qwen-3-5-experiments.md).
             # Checkpoints are already durable on the shared JuiceFS PVC, so a
             # failed/timed-out mlflow upload here is not fatal.
+            #
+            # Only upload the final checkpoint, not every intermediate one --
+            # uploading at every checkpointing_steps interval multiplied the
+            # stall risk above by the number of checkpoints in the run (e.g.
+            # 5 uploads across a 25-step run) for artifacts nobody needs
+            # mid-training, since the PVC copy is already durable.
             artifact_path = f"checkpoints/step_{self.global_step}"
-            training_logger.log_artifacts(checkpoint_dir, artifact_path=artifact_path)
             if is_final:
                 training_logger.log_final_checkpoint(
                     checkpoint_dir, artifact_path, step=self.global_step
