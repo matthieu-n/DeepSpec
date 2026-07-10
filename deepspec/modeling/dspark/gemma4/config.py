@@ -79,9 +79,7 @@ def build_draft_config(target_config, model_args):
             "markov_head_type must be provided when markov_rank > 0."
         )
 
-    # See qwen3/config.py's build_draft_config for why this must be the sglang
-    # DFlash-registered class name (DFlashDraftModel), not the training wrapper.
-    draft_config.architectures = ["DFlashDraftModel"]
+    draft_config.architectures = ["Gemma4DSparkModel"]
     draft_config.target_model_type = str(target_config.model_type)
     draft_config.target_text_model_type = str(draft_config.model_type)
     draft_config.num_target_layers = num_target_layers

@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import shutil
@@ -241,3 +242,23 @@ def _save_model_checkpoint(*, model, draft_model, checkpoint_dir: str):
             draft_state_dict[normalized_key] = value
         assert draft_state_dict, "Failed to extract draft model state_dict from checkpoint."
         draft_model.save_pretrained(checkpoint_dir, state_dict=draft_state_dict)
+        _fixup_dspark_serving_architecture(draft_model, checkpoint_dir)
+
+
+def _fixup_dspark_serving_architecture(draft_model, checkpoint_dir: str):
+    # transformers.PreTrainedModel.save_pretrained unconditionally stamps
+    # config.architectures = [type(self).__name__] just before writing
+    # config.json, clobbering whatever the DSpark config builders
+    # (deepspec/modeling/dspark/*/config.py) set. That training-time wrapper
+    # class name (Qwen3DSparkModel / Gemma4DSparkModel) isn't in sglang's
+    # model registry -- only DFlashDraftModel (sglang/srt/models/dflash.py) is
+    # -- so serving these checkpoints fails with "Cannot find model module"
+    # unless we overwrite architectures again after save_pretrained runs.
+    if not type(draft_model).__name__.endswith("DSparkModel"):
+        return
+    config_path = os.path.join(checkpoint_dir, "config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    config["architectures"] = ["DFlashDraftModel"]
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)

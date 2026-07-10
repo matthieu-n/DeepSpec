@@ -54,13 +54,7 @@ def build_draft_config(
         draft_checkpoint_config = get_pretrained_draft_attn_config(draft_checkpoint)
 
     draft_config = target_text_config
-    # sglang's native DFlash serving path (sglang/srt/models/dflash.py) resolves
-    # the draft model class purely from `architectures`, matching against its own
-    # model registry -- not via HF trust_remote_code/auto_map. It has a single
-    # registered entry, DFlashDraftModel, generic across target families, so the
-    # checkpoint must advertise that name rather than this training-time wrapper
-    # class (Qwen3DSparkModel), which sglang doesn't know about.
-    draft_config.architectures = ["DFlashDraftModel"]
+    draft_config.architectures = ["Qwen3DSparkModel"]
     draft_config.target_model_type = str(target_config.model_type)
     draft_config.num_target_layers = num_target_layers
     draft_config.num_hidden_layers = num_draft_layers
