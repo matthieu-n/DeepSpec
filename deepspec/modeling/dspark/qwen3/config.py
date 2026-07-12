@@ -84,10 +84,38 @@ def build_draft_config(
         for key, value in draft_checkpoint_config.items():
             setattr(draft_config, key, value)
 
+    # draft_config started life as a deepcopy of the *target's* text config
+    # (get_qwen3_text_config above), so for hybrid targets (e.g. Qwen3.5's
+    # mamba+attention text_config) it still carries the target-only fields
+    # below. Qwen3DSparkAttention/modeling.py never reads them -- the draft
+    # is a plain attention-only stack -- so they're dead weight that doesn't
+    # belong on a draft checkpoint and, when a pretrained draft checkpoint
+    # (e.g. modal-labs/Qwen3.5-27B-DFlash) has none of them, makes the
+    # fine-tuned checkpoint's config.json diverge from the one it started
+    # training from.
+    _TARGET_ONLY_FIELDS = (
+        "attn_output_gate",
+        "full_attention_interval",
+        "linear_conv_kernel_dim",
+        "linear_key_head_dim",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+        "linear_value_head_dim",
+        "mamba_ssm_dtype",
+        "mlp_only_layers",
+        "mtp_num_hidden_layers",
+        "mtp_use_dedicated_embeddings",
+        "partial_rotary_factor",
+    )
+    for field in _TARGET_ONLY_FIELDS:
+        if hasattr(draft_config, field):
+            delattr(draft_config, field)
+
     return draft_config
 
 
 _DRAFT_ATTN_CONFIG_KEYS = (
+    "model_type",
     "head_dim",
     "num_attention_heads",
     "num_key_value_heads",
@@ -95,6 +123,14 @@ _DRAFT_ATTN_CONFIG_KEYS = (
     "use_sliding_window",
     "max_window_layers",
     "rope_parameters",
+    # layer_types must come from the pretrained draft checkpoint, not the
+    # hardcoded all-full_attention default above -- the checkpoint's own
+    # per-layer sliding/full pattern determines which layers apply
+    # config.sliding_window at runtime (see Qwen3DSparkAttention.__init__ in
+    # modeling.py). Silently forcing full_attention on every layer changes
+    # the draft's attention geometry away from the checkpoint it started
+    # from.
+    "layer_types",
 )
 
 
