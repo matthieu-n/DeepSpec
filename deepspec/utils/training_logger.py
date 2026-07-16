@@ -7,7 +7,6 @@ from torch.utils.tensorboard import SummaryWriter
 from deepspec.utils import ensure_dir, is_global_main_process, print_on_global_main
 from deepspec.utils.metrics import add_metric, flush, reset
 
-
 _writer: Optional[SummaryWriter] = None
 _logging_steps: int = 1
 _session_start_wall: Optional[float] = None
