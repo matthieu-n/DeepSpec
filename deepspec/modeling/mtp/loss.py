@@ -1,16 +1,22 @@
 import torch
+import torch.nn.functional as F
 
 from deepspec.utils.metrics import add_metric
 
 
-def compute_mtp_loss(*, model, batch):
-    """Teacher-forced MTP training loss.
+def compute_mtp_loss(*, model, batch, ce_loss_alpha=1.0, kl_loss_alpha=0.0):
+    """Teacher-forced MTP training loss, optionally distilled from the target.
 
     ``batch["target_last_hidden_states"][:, i]`` is the base model's final
     hidden state after seeing tokens[0..i] (from an offline target cache built
     by ``scripts/data/prepare_target_cache.py``). MTP pairs that with the
     embedding of token i+1 to predict token i+2, so everything here is shifted
     relative to the cached, unshifted arrays.
+
+    ``ce_loss_alpha``/``kl_loss_alpha`` weight the two loss terms below (same
+    ``*_alpha`` convention as ``deepspec/modeling/dspark/loss.py``). Default
+    to CE-only (``kl_loss_alpha=0.0``) so existing MTP recipes that don't set
+    these keys train identically to before.
     """
     input_ids = batch["input_ids"].long()
     attention_mask = batch["attention_mask"].long()
@@ -41,14 +47,14 @@ def compute_mtp_loss(*, model, batch):
     pred_logits = logits[:, :-1, :]
     targets = input_ids[:, 2:]
     mask = loss_mask[:, 2:].to(torch.float32)
+    valid_tokens = mask.sum().clamp_min(1.0)
 
-    loss_per_token = torch.nn.functional.cross_entropy(
+    ce_loss_per_token = F.cross_entropy(
         pred_logits.reshape(-1, pred_logits.shape[-1]).float(),
         targets.reshape(-1),
         reduction="none",
     ).view_as(targets)
-    valid_tokens = mask.sum().clamp_min(1.0)
-    loss = (loss_per_token * mask).sum() / valid_tokens
+    ce_loss = (ce_loss_per_token * mask).sum() / valid_tokens
 
     with torch.no_grad():
         # Greedy speculative-decoding acceptance rate: a drafted token is
@@ -72,6 +78,24 @@ def compute_mtp_loss(*, model, batch):
         target_probs = torch.softmax(target_logits.float() / temperature, dim=-1)
         accept_rate_soft = (1.0 - 0.5 * (draft_probs - target_probs).abs().sum(-1)) * mask
         add_metric("accept_rate_soft", accept_rate_soft.sum(), den=mask.sum(), tag="train")
+
+    # KL(target_probs ‖ draft_probs) distillation term: unlike accept_rate_soft
+    # above (purely diagnostic, no_grad), this backprops into pred_logits so the
+    # draft's full next-token distribution is actually pulled toward the target's
+    # own -- the thing missing from CE-only training, which only ever sees the
+    # single ground-truth corpus token and gives accept_rate_soft no gradient
+    # signal. target_probs came out of the no_grad block above, so it's already
+    # detached; the target model (frozen) receives no gradient from this term.
+    draft_log_probs = torch.log_softmax(pred_logits.float() / temperature, dim=-1)
+    kl_loss_per_token = F.kl_div(
+        draft_log_probs, target_probs, reduction="none"
+    ).sum(-1)
+    kl_loss = (kl_loss_per_token * mask).sum() / valid_tokens
+
+    loss = ce_loss_alpha * ce_loss + kl_loss_alpha * kl_loss
+
+    add_metric("ce_loss", (ce_loss_per_token.detach() * mask).sum(), den=mask.sum(), tag="train")
+    add_metric("kl_loss", (kl_loss_per_token.detach() * mask).sum(), den=mask.sum(), tag="train")
     add_metric("loss", loss.detach(), reduction="dp_mean", tag="train")
     return loss
 

@@ -36,7 +36,13 @@ class MTPTrainer(BaseTrainer):
         return draft_model
 
     def run_batch(self, batch, tag: str = "train"):
-        return compute_mtp_loss(model=self.model, batch=batch)
+        model_args = self.args.model
+        return compute_mtp_loss(
+            model=self.model,
+            batch=batch,
+            ce_loss_alpha=float(getattr(model_args, "ce_loss_alpha", 1.0)),
+            kl_loss_alpha=float(getattr(model_args, "kl_loss_alpha", 0.0)),
+        )
 
 
 __all__ = ["MTPTrainer"]

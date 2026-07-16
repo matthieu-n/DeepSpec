@@ -14,7 +14,17 @@ project_name = "deepspec"
 # build_code_mapping_split.py) in place of the original 500-trace
 # build_span_io_split.py set. Bumped exp_name so this trains fresh against
 # the new data instead of auto-resuming v3's checkpoint.
-exp_name = "mtp_qwen36_27b_code_intelligence_v4"
+#
+# v5: added a KL(target_probs ‖ draft_probs) distillation term
+# (deepspec/modeling/mtp/loss.py) alongside the existing CE loss, since
+# accept_rate_greedy climbed monotonically on v3/v4 (it's the CE loss's own
+# training target) while accept_rate_soft stayed flat/noisy at 0.75-0.85
+# (it measures alignment with the target model's own distribution, which
+# CE-only training gives zero gradient toward). kl_loss_alpha=0.1 is a
+# starting point, not a tuned value -- adjust relative to ce_loss_alpha to
+# trade off hard-label accuracy vs. distribution-matching. Bumped exp_name
+# so this doesn't resume v4's checkpoint (trained under a different loss).
+exp_name = "mtp_qwen36_27b_code_intelligence_v5"
 seed = 42
 
 model = dict(
@@ -25,6 +35,8 @@ model = dict(
     # intermediate layer, so this is a single placeholder layer id purely to
     # satisfy the cache writer's non-empty target_layer_ids requirement.
     target_layer_ids=[0],
+    ce_loss_alpha=1.0,
+    kl_loss_alpha=0.1,
 )
 
 train = dict(
