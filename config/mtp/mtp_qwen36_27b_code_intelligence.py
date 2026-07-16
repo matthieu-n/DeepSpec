@@ -8,7 +8,13 @@ BASE_TB_DIR = os.path.expanduser("~/tensorboard")
 # Job after ttlSecondsAfterFinished) so checkpoints survive job cleanup.
 BASE_CKPT_DIR = "/share/dflash-logits-cache/checkpoints"
 project_name = "deepspec"
-exp_name = "mtp_qwen36_27b_code_intelligence_v3"
+# v4: rerun on the corrected code-mapping-qwen36 dataset (1000 traces from
+# code-intelligence-platform-service-code-mapping, deduped +
+# redaction-filtered fetch_service_spans.py fixes, dd-source
+# build_code_mapping_split.py) in place of the original 500-trace
+# build_span_io_split.py set. Bumped exp_name so this trains fresh against
+# the new data instead of auto-resuming v3's checkpoint.
+exp_name = "mtp_qwen36_27b_code_intelligence_v4"
 seed = 42
 
 model = dict(
