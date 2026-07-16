@@ -1,11 +1,11 @@
 import time
 from typing import Optional
 
+import mlflow
 from torch.utils.tensorboard import SummaryWriter
 
 from deepspec.utils import ensure_dir, is_global_main_process, print_on_global_main
 from deepspec.utils.metrics import add_metric, flush, reset
-
 
 _writer: Optional[SummaryWriter] = None
 _logging_steps: int = 1
@@ -28,11 +28,15 @@ def init(
         ensure_dir(tensorboard_dir)
         _writer = SummaryWriter(tensorboard_dir)
     if mlflow_tracking_uri is not None and is_global_main_process():
-        import mlflow
-
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         mlflow.set_experiment(mlflow_experiment_name)
         _mlflow_run = mlflow.start_run(run_name=mlflow_run_name)
+
+
+def log_params(params: dict) -> None:
+    if _mlflow_run is None or not is_global_main_process():
+        return
+    mlflow.log_params(params)
 
 
 def start_session(*, global_step: int) -> None:
@@ -84,8 +88,6 @@ def log_eval_summary(summary: dict, *, global_step: int) -> None:
 def log_artifacts(local_dir: str, artifact_path: str) -> None:
     if _mlflow_run is None or not is_global_main_process():
         return
-    import mlflow
-
     # Checkpoints are already durable on the shared PVC (BASE_CKPT_DIR) --
     # this upload is best-effort convenience only. It has no timeout in
     # mlflow's HTTP client and previously wedged training indefinitely at
@@ -110,8 +112,6 @@ def log_final_checkpoint(local_dir: str, artifact_path: str, *, step: int) -> No
     """
     if _mlflow_run is None or not is_global_main_process():
         return
-    import mlflow
-
     log_artifacts(local_dir, artifact_path="final_checkpoint")
     mlflow.set_tag("final_checkpoint_step", str(step))
     mlflow.set_tag("final_checkpoint_path", artifact_path)
@@ -123,8 +123,6 @@ def close() -> None:
         _writer.close()
         _writer = None
     if _mlflow_run is not None:
-        import mlflow
-
         mlflow.end_run()
         _mlflow_run = None
 
@@ -134,8 +132,6 @@ def _write_scalars(summary, *, global_step: int) -> None:
         for key, value in summary.items():
             _writer.add_scalar(key, value, global_step)
     if _mlflow_run is not None:
-        import mlflow
-
         # MLflow metric names allow only alphanumerics, '_-. :/' -- unlike
         # TensorBoard, so per-position metrics like "accept_rate@3" need '@'
         # replaced before logging here.
