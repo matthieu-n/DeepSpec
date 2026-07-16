@@ -425,8 +425,12 @@ class BaseTrainer:
         self.evaluate()
         if is_global_main_process():
             artifact_path = f"checkpoints/step_{self.global_step}"
-            training_logger.log_artifacts(checkpoint_dir, artifact_path=artifact_path)
             if is_final:
+                # Intermediate checkpoints are already durable on the shared
+                # JuiceFS PVC (checkpoint_dir); mlflow-uploading every one of
+                # them multiplies stall/SSL-hang risk by the checkpoint count
+                # for no benefit, so only the final checkpoint is uploaded.
+                training_logger.log_artifacts(checkpoint_dir, artifact_path=artifact_path)
                 training_logger.log_final_checkpoint(
                     checkpoint_dir, artifact_path, step=self.global_step
                 )
