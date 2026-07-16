@@ -74,10 +74,16 @@ def compute_mtp_loss(*, model, batch, ce_loss_alpha=1.0, kl_loss_alpha=0.0):
         # itself T=1 (rescale both logits by T before softmax otherwise).
         temperature = 1.0
         target_logits = model.lm_head(target_last_hidden_states[:, 1:-1, :])
-        draft_probs = torch.softmax(pred_logits.float() / temperature, dim=-1)
-        target_probs = torch.softmax(target_logits.float() / temperature, dim=-1)
+        draft_probs = torch.softmax(pred_logits / temperature, dim=-1)
+        target_probs = torch.softmax(target_logits / temperature, dim=-1)
         accept_rate_soft = (1.0 - 0.5 * (draft_probs - target_probs).abs().sum(-1)) * mask
         add_metric("accept_rate_soft", accept_rate_soft.sum(), den=mask.sum(), tag="train")
+        # target_logits/draft_probs are full (batch, seq, vocab) tensors with
+        # no further use past this point -- at seq_len=12288 and vocab~152k
+        # each is several GiB, so drop the references now rather than let
+        # them sit alive (still bound to these names) through the KL term
+        # below, which needs its own set of same-sized tensors.
+        del target_logits, draft_probs
 
     # KL(target_probs ‖ draft_probs) distillation term: unlike accept_rate_soft
     # above (purely diagnostic, no_grad), this backprops into pred_logits so the
@@ -86,10 +92,15 @@ def compute_mtp_loss(*, model, batch, ce_loss_alpha=1.0, kl_loss_alpha=0.0):
     # single ground-truth corpus token and gives accept_rate_soft no gradient
     # signal. target_probs came out of the no_grad block above, so it's already
     # detached; the target model (frozen) receives no gradient from this term.
-    draft_log_probs = torch.log_softmax(pred_logits.float() / temperature, dim=-1)
+    # Kept in bf16 (not upcast to fp32 like the CE path) -- these are the same
+    # (batch, seq, vocab) shape as above, and softmax/log_softmax stability
+    # depends on exponent range (unaffected by bf16's reduced mantissa), not
+    # on fp32. Only the post-reduction per-token value (vocab dim already
+    # summed out, so tiny) is cast up for loss-accumulation precision.
+    draft_log_probs = torch.log_softmax(pred_logits / temperature, dim=-1)
     kl_loss_per_token = F.kl_div(
         draft_log_probs, target_probs, reduction="none"
-    ).sum(-1)
+    ).sum(-1).float()
     kl_loss = (kl_loss_per_token * mask).sum() / valid_tokens
 
     loss = ce_loss_alpha * ce_loss + kl_loss_alpha * kl_loss
