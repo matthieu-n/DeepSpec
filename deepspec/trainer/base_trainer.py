@@ -182,6 +182,7 @@ class BaseTrainer:
             ),
             mlflow_run_name=self.args.exp_name,
         )
+        training_logger.log_params(self._collect_run_params())
 
         self.draft_model, self.tokenizer = self.build_models()
         if self.resume_checkpoint_dir is not None:
@@ -257,6 +258,19 @@ class BaseTrainer:
     @property
     def global_step(self):
         return self.next_micro_step // self.gradient_accumulation_steps
+
+    def _collect_run_params(self) -> dict:
+        params = {}
+        for key, value in self.args.train.items():
+            if not callable(value) and not isinstance(value, type):
+                params[f"train.{key}"] = str(value)
+        for key, value in self.args.model.items():
+            if not callable(value) and not isinstance(value, type):
+                params[f"model.{key}"] = str(value)
+        for key, value in self.args.data.items():
+            if not callable(value) and not isinstance(value, type):
+                params[f"data.{key}"] = str(value)
+        return params
 
     def info_board(self):
         print_on_local_main("***** Running training *****")
